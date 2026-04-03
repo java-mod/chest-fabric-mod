@@ -65,6 +65,14 @@ public class BotBridge {
         connectWithCode(islandCode);
     }
 
+    public void startAsync() {
+        if (islandCode == null || islandCode.isBlank()) {
+            log("서버에 연결되지 않음. /창고봇 연결 <코드> 를 입력하세요.");
+            return;
+        }
+        connectWithCodeAsync(islandCode);
+    }
+
     public void stop() {
         chestMap.clear();
         islandName = null;
@@ -147,6 +155,10 @@ public class BotBridge {
 
     public CompletableFuture<Boolean> enterAdminModeAsync(String joinCode, String adminCode) {
         return CompletableFuture.supplyAsync(() -> enterAdminMode(joinCode, adminCode));
+    }
+
+    public CompletableFuture<Boolean> finalizeAdminModeAsync() {
+        return CompletableFuture.supplyAsync(this::finalizeAdminMode);
     }
 
     public void addAdminChest(String name, BlockPos pos, BlockPos secondaryPos) {
@@ -393,7 +405,14 @@ public class BotBridge {
         if (Files.exists(path)) {
             try {
                 JsonObject cfg = JsonParser.parseReader(new FileReader(path.toFile())).getAsJsonObject();
-                if (cfg.has("server_url"))  serverUrl  = cfg.get("server_url").getAsString();
+                if (cfg.has("server_url")) {
+                    String url = cfg.get("server_url").getAsString().trim();
+                    if (url.startsWith("https://")) {
+                        url = "http://" + url.substring("https://".length());
+                        log("경고: server_url이 https:// 로 설정되어 있어 http:// 로 자동 변환했습니다. 서버가 HTTPS를 지원한다면 무시하세요.");
+                    }
+                    serverUrl = url;
+                }
                 if (cfg.has("island_code") && !cfg.get("island_code").isJsonNull()) {
                     islandCode = cfg.get("island_code").getAsString();
                 }
