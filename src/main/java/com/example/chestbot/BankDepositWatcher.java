@@ -48,7 +48,8 @@ public final class BankDepositWatcher {
         bridge.sendIslandBankLog(transaction.playerName(), transaction.transactionType(), transaction.amountText(), null, rawMessage, true);
 
         if (!overlay) {
-            client.player.sendMessage(buildReasonPrompt(transaction.transactionType(), transaction.amountText()), false);
+            client.player.sendMessage(Text.literal("§6[창고지기] §e섬 은행 " + transactionLabel(transaction.transactionType()) + " 감지: §f" + transaction.amountText()), false);
+            client.player.sendMessage(buildReasonPrompt(transaction.transactionType()), false);
         }
     }
 
@@ -108,8 +109,8 @@ public final class BankDepositWatcher {
         return trimmed;
     }
 
-    private static MutableText buildReasonPrompt(String transactionType, String amountText) {
-        MutableText prefix = Text.literal("§6[창고지기] §e섬 은행 " + transactionLabel(transactionType) + " 감지: §f" + amountText + "\n§7사유를 입력하려면 ");
+    private static MutableText buildReasonPrompt(String transactionType) {
+        MutableText prefix = Text.literal("§7(" + transactionLabel(transactionType) + " 사유) ");
         MutableText button = Text.literal("[사유 입력]")
                 .styled(style -> style
                         .withColor(Formatting.YELLOW)
