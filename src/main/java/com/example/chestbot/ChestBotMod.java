@@ -20,7 +20,7 @@ public class ChestBotMod implements ClientModInitializer {
         bridge = new BotBridge();
 
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) ->
-                bridge.start());
+                bridge.startAsync());
 
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) ->
                 bridge.stop());
