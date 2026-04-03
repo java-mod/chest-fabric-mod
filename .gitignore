@@ -1,0 +1,31 @@
+.gradle/
+build/
+bin/
+out/
+
+# IDE and OS files
+.classpath
+.factorypath
+.project
+.settings/
+.idea/
+*.iml
+Thumbs.db
+Desktop.ini
+
+# Logs and local env
+*.log
+.env
+.env.*
+!.env.example
+local.properties
+
+# Sensitive credentials and keys
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+secrets.*
+credentials.*
