@@ -48,24 +48,27 @@ public class ChestInteractor {
         BlockPos secondary = findAdjacentChest(client, pos);
         bridge.addAdminChest(name, pos, secondary);
         bridge.clearPendingChestSelection();
-        boolean saved = bridge.finalizeAdminMode();
 
+        String doubleChestSuffix = secondary != null ? " §7(더블체스트: " + secondary.toShortString() + ")" : "";
         if (client.player != null) {
-            String msg = saved
-                    ? "§a[창고지기] ✅ '" + name + "' 저장됨 @ " + pos.toShortString()
-                    : "§c[창고지기] ❌ '" + name + "' 저장 실패 @ " + pos.toShortString();
-            if (secondary != null) {
-                msg += " §7(더블체스트: " + secondary.toShortString() + ")";
-            }
-            client.player.sendMessage(Text.literal(msg), false);
-            if (saved) {
-                client.player.sendMessage(Text.literal(
-                        "§7즉시 저장 완료 | 활성 chest " + bridge.getChestMap().size() + "개"), false);
-            } else {
-                client.player.sendMessage(Text.literal(
-                        "§c[창고지기] 관리자 코드가 만료되었거나 서버 저장에 실패했습니다. 새 관리자 코드를 발급받아 다시 시도하세요."), false);
-            }
+            client.player.sendMessage(Text.literal("§7[창고지기] '" + name + "' 저장 중..."), false);
         }
+        bridge.finalizeAdminModeAsync().whenComplete((saved, err) -> {
+            if (client.player == null) return;
+            net.minecraft.client.MinecraftClient.getInstance().execute(() -> {
+                if (err != null || !Boolean.TRUE.equals(saved)) {
+                    client.player.sendMessage(Text.literal(
+                            "§c[창고지기] ❌ '" + name + "' 저장 실패 @ " + pos.toShortString() + doubleChestSuffix), false);
+                    client.player.sendMessage(Text.literal(
+                            "§c[창고지기] 관리자 코드가 만료되었거나 서버 저장에 실패했습니다. 새 관리자 코드를 발급받아 다시 시도하세요."), false);
+                } else {
+                    client.player.sendMessage(Text.literal(
+                            "§a[창고지기] ✅ '" + name + "' 저장됨 @ " + pos.toShortString() + doubleChestSuffix), false);
+                    client.player.sendMessage(Text.literal(
+                            "§7즉시 저장 완료 | 활성 chest " + bridge.getChestMap().size() + "개"), false);
+                }
+            });
+        });
     }
 
     public static void tick(MinecraftClient client) {
