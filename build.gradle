@@ -1,57 +1,70 @@
+// 루트 프로젝트는 직접 빌드하지 않고, 각 버전 서브프로젝트의 공통 설정만 담당합니다.
 plugins {
-    id 'fabric-loom' version "${loom_version}"
-    id 'maven-publish'
+    id 'fabric-loom' apply false
 }
 
-version = project.mod_version
-group   = project.maven_group
+subprojects {
+    apply plugin: 'fabric-loom'
+    apply plugin: 'maven-publish'
 
-base {
-    archivesName = project.archives_base_name
-}
+    version = "${project.mod_version}+mc${project.minecraft_version}"
+    group   = project.maven_group
 
-repositories {
-    maven {
-        name = 'Fabric'
-        url  = 'https://maven.fabricmc.net/'
+    base {
+        archivesName = "changojigi-fabric-mod-${project.minecraft_version}"
     }
-    mavenCentral()
-}
 
-dependencies {
-    minecraft         "com.mojang:minecraft:${project.minecraft_version}"
-    mappings          "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-
-    // Full FA for compilation
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
-
-    // Jar-in-Jar: bundle only modules actually used
-    def apiVer = project.fabric_api_version
-    [
-        "fabric-command-api-v2",       // /chestbot commands
-        "fabric-lifecycle-events-v1",  // ClientTickEvents
-        "fabric-message-api-v1",       // ClientReceiveMessageEvents
-        "fabric-networking-api-v1",    // ClientPlayConnectionEvents
-    ].each { modName ->
-        include fabricApi.module(modName, apiVer)
+    repositories {
+        maven {
+            name = 'Fabric'
+            url  = 'https://maven.fabricmc.net/'
+        }
+        mavenCentral()
     }
-}
 
-processResources {
-    inputs.property 'version', project.version
-    filesMatching('fabric.mod.json') {
-        expand 'version': project.version
+    dependencies {
+        minecraft         "com.mojang:minecraft:${project.minecraft_version}"
+        mappings          "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+        modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
     }
-}
 
-tasks.withType(JavaCompile).configureEach {
-    it.options.release = 21
-}
-
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+    // 공통 소스 + 각 서브프로젝트 버전별 소스를 함께 컴파일
+    sourceSets {
+        main {
+            java {
+                srcDir rootProject.file('src/main/java')  // 공통 Java 소스
+                srcDir 'src/main/java'                    // 버전별 Java 소스 (compat 등)
+            }
+            resources {
+                srcDir 'src/main/resources'                    // 버전별 fabric.mod.json (우선)
+                srcDir rootProject.file('src/main/resources')  // 공통 리소스 (아이콘 등)
+            }
+        }
     }
-    withSourcesJar()
+
+    processResources {
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+        inputs.property 'version',           project.version
+        inputs.property 'minecraft_version', project.minecraft_version
+        filesMatching('fabric.mod.json') {
+            expand version:           project.version,
+                   minecraft_version: project.minecraft_version
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        it.options.release = 21
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+        withSourcesJar()
+    }
+
+    tasks.named('sourcesJar', Jar) {
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    }
 }

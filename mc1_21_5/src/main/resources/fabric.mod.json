@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "chestbot",
+  "version": "${version}",
+  "name": "창고지기",
+  "icon": "assets/chestbot/icon.png",
+  "description": "상자를 추적하고 인벤토리 변화를 디스코드 봇에 보고합니다.",
+  "authors": [
+    "whitecod_"
+  ],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.example.chestbot.ChestBotMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.10",
+    "minecraft": "~${minecraft_version}",
+    "java": ">=21",
+    "fabric": ">=0.128.0"
+  }
+}
