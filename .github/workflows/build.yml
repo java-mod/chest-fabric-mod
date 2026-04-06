@@ -23,5 +23,19 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x gradlew
 
-      - name: Build mod
-        run: ./gradlew build
+      - name: Build all versions (mc1_21_4 ~ mc1_21_11)
+        run: ./gradlew clean build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: changojigi-fabric-mod-jars
+          path: |
+            mc1_21_4/build/libs/*.jar
+            mc1_21_5/build/libs/*.jar
+            mc1_21_7/build/libs/*.jar
+            mc1_21_8/build/libs/*.jar
+            mc1_21_10/build/libs/*.jar
+            mc1_21_11/build/libs/*.jar
+          if-no-files-found: warn

@@ -34,44 +34,44 @@ jobs:
             echo "Tag must start with v, got: $GITHUB_REF_NAME" >&2
             exit 1
           fi
-
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build release jar
+      - name: Build all versions
         run: ./gradlew clean build -Pmod_version=${{ steps.version.outputs.value }}
 
-      - name: Resolve release asset
-        id: asset
+      - name: Collect release JARs
+        id: assets
         shell: bash
         run: |
           shopt -s nullglob
-          jars=(build/libs/*.jar)
-
-          selected=""
-          for jar in "${jars[@]}"; do
-            case "$jar" in
-              *-sources.jar|*-dev.jar)
-                continue
-                ;;
-              *)
-                selected="$jar"
-                break
-                ;;
-            esac
+          files=()
+          for dir in mc1_21_4 mc1_21_5 mc1_21_7 mc1_21_8 mc1_21_10 mc1_21_11; do
+            for jar in "$dir/build/libs/"*.jar; do
+              case "$jar" in
+                *-sources.jar|*-dev.jar) continue ;;
+                *) files+=("$jar") ;;
+              esac
+            done
           done
 
-          if [[ -z "$selected" ]]; then
-            echo "No release jar found in build/libs" >&2
-            ls -al build/libs >&2 || true
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No release JARs found" >&2
             exit 1
           fi
 
-          echo "path=$selected" >> "$GITHUB_OUTPUT"
-          echo "Selected asset: $selected"
+          # GitHub Actions multiline output
+          {
+            echo "paths<<EOF"
+            for f in "${files[@]}"; do echo "$f"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Found JARs:"
+          printf '  %s\n' "${files[@]}"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: ${{ steps.asset.outputs.path }}
+          files: ${{ steps.assets.outputs.paths }}
