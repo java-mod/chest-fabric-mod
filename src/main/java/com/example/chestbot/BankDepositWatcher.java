@@ -1,7 +1,7 @@
 package com.example.chestbot;
 
+import com.example.chestbot.compat.ClickEventCompat;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.text.ClickEvent;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Style;
 import net.minecraft.text.Text;
@@ -115,7 +115,7 @@ public final class BankDepositWatcher {
                 .styled(style -> style
                         .withColor(Formatting.YELLOW)
                         .withUnderline(true)
-                        .withClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, REASON_COMMAND)));
+                        .withClickEvent(ClickEventCompat.suggestCommand(REASON_COMMAND)));
         MutableText suffix = Text.literal("§7 을 클릭하세요.");
         return prefix.append(button).append(suffix);
     }
