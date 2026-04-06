@@ -48,6 +48,7 @@ public class ChestBotCommand {
 
     private static LiteralArgumentBuilder<FabricClientCommandSource> buildRoot(String root, boolean korean) {
         String connect = korean ? "연결" : "connect";
+        String license = korean ? "라이선스" : "license";
         String list = korean ? "목록" : "list";
         String reload = korean ? "새로고침" : "reload";
         String admin = korean ? "관리자" : "admin";
@@ -74,6 +75,34 @@ public class ChestBotCommand {
                                                     + " §7| chest §f" + bridge.getChestMap().size() + "§7개"));
                                         } else {
                                             ctx.getSource().sendFeedback(text("§c[창고지기] ❌ 연결 실패. 코드를 확인하세요."));
+                                        }
+                                    });
+                                    return 1;
+                                })))
+
+                .then(ClientCommandManager.literal(license)
+                        .executes(ctx -> {
+                            ctx.getSource().sendFeedback(text("§e[창고지기] 사용법: /chestbot license <라이선스키>  또는  /창고봇 라이선스 <키>"));
+                            ctx.getSource().sendFeedback(text("§7섬장만 라이선스 키로 연결하세요. 팀원은 발급된 조인코드로 /창고봇 연결 을 사용합니다."));
+                            return 0;
+                        })
+                        .then(ClientCommandManager.argument("key", StringArgumentType.word())
+                                .executes(ctx -> {
+                                    String key = StringArgumentType.getString(ctx, "key");
+                                    ctx.getSource().sendFeedback(text("§7[창고지기] 라이선스 인증 중..."));
+                                    runAsync(ctx.getSource(), ChestBotMod.getBridge().connectWithLicenseAsync(key), ok -> {
+                                        BotBridge bridge = ChestBotMod.getBridge();
+                                        if (ok) {
+                                            ctx.getSource().sendFeedback(text(
+                                                    "§a[창고지기] ✅ 라이선스 인증 성공! 섬: §f" + bridge.getIslandName()
+                                                    + " §7| 조인코드: §f" + bridge.getIslandCode()
+                                                    + " §7| chest §f" + bridge.getChestMap().size() + "§7개"));
+                                            ctx.getSource().sendFeedback(text(
+                                                    "§e팀원에게 조인코드 §f" + bridge.getIslandCode() + "§e 를 공유하세요."));
+                                        } else {
+                                            String err = bridge.getLastConnectError();
+                                            String msg = (err != null) ? err : "라이선스 인증 실패. 관리자에게 문의하세요.";
+                                            ctx.getSource().sendFeedback(text("§c[창고지기] ❌ " + msg));
                                         }
                                     });
                                     return 1;
