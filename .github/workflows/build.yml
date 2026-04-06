@@ -2,8 +2,8 @@ name: Build changojigi-fabric-mod
 
 on:
   push:
-    branches:
-      - "**"
+    branches-ignore:
+      - main   # main은 release.yml 에서 처리
   pull_request:
 
 jobs:
