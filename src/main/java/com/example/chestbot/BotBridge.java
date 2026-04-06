@@ -25,16 +25,18 @@ import java.util.concurrent.CompletableFuture;
  */
 public class BotBridge {
 
-    private static final String DEFAULT_URL = "http://15.235.143.55:5000";
+    private static final String DEFAULT_URL = "https://chestbot.kro.kr";
 
     // ── 설정 (파일에서 로드) ────────────────────────────────────
     private String serverUrl;
     private String islandCode;
+    private String licenseKey;
 
     // ── 런타임 상태 ─────────────────────────────────────────────
     private String islandName;
     private long configVersion;
     private final Map<String, BlockPos> chestMap = new LinkedHashMap<>();
+    private String lastConnectError;
 
     // ── 관리자 모드 상태 ────────────────────────────────────────
     private boolean adminMode;
@@ -58,19 +60,23 @@ public class BotBridge {
     // ── 서버 연결 시 자동 bootstrap ─────────────────────────────
 
     public void start() {
-        if (islandCode == null || islandCode.isBlank()) {
-            log("서버에 연결되지 않음. /창고봇 연결 <코드> 를 입력하세요.");
-            return;
+        if (licenseKey != null && !licenseKey.isBlank()) {
+            connectWithLicense(licenseKey);
+        } else if (islandCode != null && !islandCode.isBlank()) {
+            connectWithCode(islandCode);
+        } else {
+            log("서버에 연결되지 않음. /창고봇 라이선스 <키> 또는 /창고봇 연결 <코드> 를 입력하세요.");
         }
-        connectWithCode(islandCode);
     }
 
     public void startAsync() {
-        if (islandCode == null || islandCode.isBlank()) {
-            log("서버에 연결되지 않음. /창고봇 연결 <코드> 를 입력하세요.");
-            return;
+        if (licenseKey != null && !licenseKey.isBlank()) {
+            connectWithLicenseAsync(licenseKey);
+        } else if (islandCode != null && !islandCode.isBlank()) {
+            connectWithCodeAsync(islandCode);
+        } else {
+            log("서버에 연결되지 않음. /창고봇 라이선스 <키> 또는 /창고봇 연결 <코드> 를 입력하세요.");
         }
-        connectWithCodeAsync(islandCode);
     }
 
     public void stop() {
@@ -94,11 +100,18 @@ public class BotBridge {
         JsonObject body = new JsonObject();
         body.addProperty("joinCode", normalizedCode);
 
-        String response = postSync("/api/v1/client/connect", body);
-        if (response == null) return false;
+        HttpResult result = postJson("/api/v1/client/connect", body);
+        if (!result.success()) {
+            log(result.describeFailure());
+            if (result.statusCode() == 403) {
+                clearAndSaveConfig();
+                log("라이선스 비활성화: 연결 정보를 초기화했습니다.");
+            }
+            return false;
+        }
 
         try {
-            JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+            JsonObject json = JsonParser.parseString(result.body()).getAsJsonObject();
             islandName    = json.get("islandName").getAsString();
             configVersion = json.get("configVersion").getAsLong();
 
@@ -122,8 +135,87 @@ public class BotBridge {
         }
     }
 
+    /** 403 수신 시 호출 — 모든 연결 정보를 초기화하고 config 파일을 저장한다. */
+    private void clearAndSaveConfig() {
+        licenseKey    = null;
+        islandCode    = null;
+        islandName    = null;
+        configVersion = 0L;
+        chestMap.clear();
+        saveConfig();
+    }
+
     public CompletableFuture<Boolean> connectWithCodeAsync(String code) {
         return CompletableFuture.supplyAsync(() -> connectWithCode(code));
+    }
+
+    // ── 라이선스 키로 섬 연결 (섬장 전용) ────────────────────────
+
+    public boolean connectWithLicense(String key) {
+        lastConnectError = null;
+        JsonObject body = new JsonObject();
+        body.addProperty("licenseKey", key.trim().toUpperCase());
+
+        HttpResult result = postJson("/api/v1/client/connect/license", body);
+        if (!result.success()) {
+            log(result.describeFailure());
+            if (result.statusCode() == 401) {
+                lastConnectError = "등록되지 않은 라이선스 키입니다. 키를 다시 확인하세요.";
+            } else if (result.statusCode() == 403) {
+                String serverMsg = parseServerMessage(result.body());
+                lastConnectError = serverMsg + "\n§e관리자에게 문의하세요.";
+                clearAndSaveConfig();
+                log("라이선스 인증 실패(403): 연결 정보를 초기화했습니다.");
+            } else if (result.statusCode() == -1) {
+                lastConnectError = "서버에 연결할 수 없습니다. 잠시 후 다시 시도하세요.";
+            } else {
+                lastConnectError = "라이선스 인증 실패 (코드 " + result.statusCode() + "). 관리자에게 문의하세요.";
+            }
+            return false;
+        }
+
+        try {
+            JsonObject json = JsonParser.parseString(result.body()).getAsJsonObject();
+            islandName    = json.get("islandName").getAsString();
+            islandCode    = json.get("joinCode").getAsString();
+            configVersion = json.get("configVersion").getAsLong();
+            licenseKey    = key.trim().toUpperCase();
+
+            chestMap.clear();
+            JsonArray chests = json.getAsJsonArray("chests");
+            for (JsonElement el : chests) {
+                JsonObject c = el.getAsJsonObject();
+                chestMap.put(
+                        c.get("chestKey").getAsString(),
+                        new BlockPos(c.get("x").getAsInt(), c.get("y").getAsInt(), c.get("z").getAsInt())
+                );
+            }
+
+            saveConfig();
+            log("라이선스 연결 성공! 섬: " + islandName + " | 조인코드: " + islandCode
+                    + " | chest " + chestMap.size() + "개 (버전 " + configVersion + ")");
+            return true;
+        } catch (Exception e) {
+            log("라이선스 연결 응답 파싱 오류: " + e.getMessage());
+            lastConnectError = "서버 응답 처리 중 오류가 발생했습니다.";
+            return false;
+        }
+    }
+
+    /** 서버 에러 응답 JSON의 {@code message} 필드를 추출한다. 파싱 실패 시 기본 메시지를 반환한다. */
+    private static String parseServerMessage(String body) {
+        if (body == null || body.isBlank()) return "라이선스 인증에 실패했습니다.";
+        try {
+            JsonObject err = JsonParser.parseString(body).getAsJsonObject();
+            if (err.has("message") && !err.get("message").isJsonNull()) {
+                return err.get("message").getAsString();
+            }
+        } catch (Exception ignored) {}
+        return "라이선스 인증에 실패했습니다.";
+    }
+
+    public CompletableFuture<Boolean> connectWithLicenseAsync(String key) {
+        return CompletableFuture.supplyAsync(() -> connectWithLicense(key));
     }
 
     // ── 관리자 모드 ──────────────────────────────────────────────
@@ -383,6 +475,8 @@ public class BotBridge {
     public boolean isAdminMode()    { return adminMode; }
     public String  getIslandCode()  { return islandCode; }
     public String  getIslandName()  { return islandName; }
+    public String  getLicenseKey()      { return licenseKey; }
+    public String  getLastConnectError() { return lastConnectError; }
     public String  getAdminIslandName() { return adminIslandName; }
     public long    getConfigVersion() { return configVersion; }
     public List<ChestDef> getPendingChests() { return Collections.unmodifiableList(pendingChests); }
@@ -390,6 +484,9 @@ public class BotBridge {
     // ── 설정 파일 ────────────────────────────────────────────────
 
     public boolean reload() {
+        if (licenseKey != null && !licenseKey.isBlank()) {
+            return connectWithLicense(licenseKey);
+        }
         return islandCode != null && connectWithCode(islandCode);
     }
 
@@ -401,27 +498,26 @@ public class BotBridge {
         Path path = Path.of("config", "chestbot.json");
         serverUrl  = DEFAULT_URL;
         islandCode = null;
+        licenseKey = null;
 
         if (Files.exists(path)) {
             try {
                 JsonObject cfg = JsonParser.parseReader(new FileReader(path.toFile())).getAsJsonObject();
                 if (cfg.has("server_url")) {
-                    String url = cfg.get("server_url").getAsString().trim();
-                    if (url.startsWith("https://")) {
-                        url = "http://" + url.substring("https://".length());
-                        log("경고: server_url이 https:// 로 설정되어 있어 http:// 로 자동 변환했습니다. 서버가 HTTPS를 지원한다면 무시하세요.");
-                    }
-                    serverUrl = url;
+                    serverUrl = cfg.get("server_url").getAsString().trim();
                 }
                 if (cfg.has("island_code") && !cfg.get("island_code").isJsonNull()) {
                     islandCode = cfg.get("island_code").getAsString();
+                }
+                if (cfg.has("license_key") && !cfg.get("license_key").isJsonNull()) {
+                    licenseKey = cfg.get("license_key").getAsString();
                 }
             } catch (Exception e) {
                 log("config 로드 오류: " + e.getMessage());
             }
         } else {
             saveConfig();
-            log("config/chestbot.json 생성됨. server_url 과 island_code 를 설정하거나 /창고봇 연결 을 사용하세요.");
+            log("config/chestbot.json 생성됨. /창고봇 라이선스 <키> 로 연결하거나 /창고봇 연결 <코드> 를 사용하세요.");
         }
     }
 
@@ -431,6 +527,8 @@ public class BotBridge {
             Files.createDirectories(path.getParent());
             JsonObject cfg = new JsonObject();
             cfg.addProperty("server_url", serverUrl);
+            if (licenseKey != null) cfg.addProperty("license_key", licenseKey);
+            else cfg.add("license_key", JsonNull.INSTANCE);
             if (islandCode != null) cfg.addProperty("island_code", islandCode);
             else cfg.add("island_code", JsonNull.INSTANCE);
             Files.writeString(path, new GsonBuilder().setPrettyPrinting().create().toJson(cfg));
@@ -473,6 +571,13 @@ public class BotBridge {
                     if (attempt > 1) {
                         log(context + " 재시도 성공 (" + attempt + "/3)");
                     }
+                    return;
+                }
+
+                // 403: 라이선스 비활성화 — 재시도 없이 즉시 초기화
+                if (result.statusCode() == 403) {
+                    log(context + " 전송 실패: 라이선스가 비활성화되었습니다. 연결 정보를 초기화합니다.");
+                    clearAndSaveConfig();
                     return;
                 }
 
