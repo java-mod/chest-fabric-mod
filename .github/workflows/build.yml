@@ -9,6 +9,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [mc1_21_4, mc1_21_5, mc1_21_7, mc1_21_8, mc1_21_10, mc1_21_11]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,19 +28,16 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x gradlew
 
-      - name: Build all versions (mc1_21_4 ~ mc1_21_11)
-        run: ./gradlew clean build
+      - name: Build ${{ matrix.version }}
+        run: ./gradlew :${{ matrix.version }}:build
 
-      - name: Upload build artifacts
+      - name: Upload ${{ matrix.version }} artifact
         uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: changojigi-fabric-mod-jars
+          name: ${{ matrix.version }}-jars
           path: |
-            mc1_21_4/build/libs/*.jar
-            mc1_21_5/build/libs/*.jar
-            mc1_21_7/build/libs/*.jar
-            mc1_21_8/build/libs/*.jar
-            mc1_21_10/build/libs/*.jar
-            mc1_21_11/build/libs/*.jar
+            ${{ matrix.version }}/build/libs/*.jar
+            !${{ matrix.version }}/build/libs/*-dev.jar
+            !${{ matrix.version }}/build/libs/*-sources.jar
           if-no-files-found: warn

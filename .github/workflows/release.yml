@@ -39,39 +39,32 @@ jobs:
       - name: Build all versions
         run: ./gradlew clean build -Pmod_version=${{ steps.version.outputs.value }}
 
-      - name: Collect release JARs
-        id: assets
+      - name: Stage release JARs
         shell: bash
         run: |
-          shopt -s nullglob
-          files=()
-          for dir in mc1_21_4 mc1_21_5 mc1_21_7 mc1_21_8 mc1_21_10 mc1_21_11; do
-            for jar in "$dir/build/libs/"*.jar; do
-              case "$jar" in
-                *-sources.jar|*-dev.jar) continue ;;
-                *) files+=("$jar") ;;
-              esac
-            done
-          done
+          mkdir -p release-jars
+          find mc1_21_4/build/libs \
+               mc1_21_5/build/libs \
+               mc1_21_7/build/libs \
+               mc1_21_8/build/libs \
+               mc1_21_10/build/libs \
+               mc1_21_11/build/libs \
+               -name "*.jar" \
+               ! -name "*-sources.jar" \
+               ! -name "*-dev.jar" \
+               -exec cp {} release-jars/ \;
 
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "No release JARs found" >&2
+          echo "── Release JARs ──"
+          ls -lh release-jars/
+
+          if [ -z "$(ls -A release-jars/)" ]; then
+            echo "::error::No release JARs found" >&2
             exit 1
           fi
-
-          # GitHub Actions multiline output
-          {
-            echo "paths<<EOF"
-            for f in "${files[@]}"; do echo "$f"; done
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "Found JARs:"
-          printf '  %s\n' "${files[@]}"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: ${{ steps.assets.outputs.paths }}
+          files: release-jars/*.jar
