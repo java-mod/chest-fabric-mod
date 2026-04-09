@@ -2,6 +2,9 @@ package com.example.chestbot.command;
 
 import com.example.chestbot.BotBridge;
 import com.example.chestbot.ChestBotMod;
+import com.example.chestbot.hud.ChestBotHudEditScreen;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -22,7 +25,7 @@ import java.util.concurrent.CompletableFuture;
  *
  * <pre>
  * 플레이어:
- *   /chestbot connect &lt;코드&gt;   — 6자리 참여코드로 섬 연결
+ *   /chestbot connect          — 현재 서버 주소 기준으로 섬 연결
  *   /chestbot list             — 등록된 chest 목록
  *   /chestbot reload           — 서버에서 설정 재로드
  *
@@ -48,63 +51,84 @@ public class ChestBotCommand {
 
     private static LiteralArgumentBuilder<FabricClientCommandSource> buildRoot(String root, boolean korean) {
         String connect = korean ? "연결" : "connect";
-        String license = korean ? "라이선스" : "license";
+        String server = korean ? "서버" : "server";
         String list = korean ? "목록" : "list";
         String reload = korean ? "새로고침" : "reload";
         String admin = korean ? "관리자" : "admin";
         String add = korean ? "추가" : "add";
         String remove = korean ? "제거" : "remove";
         String depositReason = korean ? "입금사유" : "depositreason";
+        String hud = korean ? "허드" : "hud";
+        String toggle = korean ? "토글" : "toggle";
+        String position = korean ? "위치" : "position";
+        String scale = korean ? "크기" : "scale";
+        String reset = korean ? "초기화" : "reset";
+        String edit = korean ? "수정모드" : "edit";
 
         return ClientCommandManager.literal(root)
 
                 .then(ClientCommandManager.literal(connect)
                         .executes(ctx -> {
-                            ctx.getSource().sendFeedback(text("§e[창고지기] 사용법: /chestbot connect <6자리코드>  또는  /창고봇 연결 <코드>"));
-                            return 0;
-                        })
-                        .then(ClientCommandManager.argument("code", StringArgumentType.word())
-                                .executes(ctx -> {
-                                    String code = StringArgumentType.getString(ctx, "code");
-                                    ctx.getSource().sendFeedback(text("§7[창고지기] 연결 시도 중..."));
-                                    runAsync(ctx.getSource(), ChestBotMod.getBridge().connectWithCodeAsync(code), ok -> {
-                                        if (ok) {
-                                            BotBridge bridge = ChestBotMod.getBridge();
-                                            ctx.getSource().sendFeedback(text(
-                                                    "§a[창고지기] ✅ 연결 성공! 섬: §f" + bridge.getIslandName()
+                            BotBridge bridge = ChestBotMod.getBridge();
+                            ctx.getSource().sendFeedback(text("§7[창고지기] 서버에서 현재 설정을 불러오는 중..."));
+                            runAsync(ctx.getSource(), bridge.connectAsync(), ok -> {
+                                if (ok) {
+                                    ctx.getSource().sendFeedback(text(
+                                            "§a[창고지기] ✅ 연결 성공! 섬: §f" + bridge.getIslandName()
                                                     + " §7| chest §f" + bridge.getChestMap().size() + "§7개"));
-                                        } else {
-                                            ctx.getSource().sendFeedback(text("§c[창고지기] ❌ 연결 실패. 코드를 확인하세요."));
-                                        }
-                                    });
-                                    return 1;
+                                } else {
+                                    ctx.getSource().sendFeedback(text("§c[창고지기] ❌ 연결 실패. 서버 주소와 봇 상태를 확인하세요."));
+                                }
+                            });
+                            return 1;
+                        })
+                        .then(ClientCommandManager.argument("target", StringArgumentType.greedyString())
+                                .executes(ctx -> {
+                                    String target = StringArgumentType.getString(ctx, "target");
+                                    BotBridge bridge = ChestBotMod.getBridge();
+
+                                    if (bridge.setServerUrl(target)) {
+                                        ctx.getSource().sendFeedback(text("§a[창고지기] ✅ 서버 주소로 인식해 저장했습니다: §f" + bridge.getServerUrl()));
+                                        ctx.getSource().sendFeedback(text("§7바로 서버 설정을 불러옵니다..."));
+                                        runAsync(ctx.getSource(), bridge.connectAsync(), ok -> {
+                                            if (ok) {
+                                                ctx.getSource().sendFeedback(text(
+                                                        "§a[창고지기] ✅ 연결 성공! 섬: §f" + bridge.getIslandName()
+                                                                + " §7| chest §f" + bridge.getChestMap().size() + "§7개"));
+                                            } else {
+                                                ctx.getSource().sendFeedback(text("§c[창고지기] ❌ 연결 실패. 서버 주소와 봇 상태를 확인하세요."));
+                                            }
+                                        });
+                                        return 1;
+                                    }
+
+                                    ctx.getSource().sendFeedback(text("§c[창고지기] 서버 주소 형식이 올바르지 않습니다. 예: 127.0.0.1:5000 또는 https://example.com"));
+                                    return 0;
                                 })))
 
-                .then(ClientCommandManager.literal(license)
+                .then(ClientCommandManager.literal(server)
                         .executes(ctx -> {
-                            ctx.getSource().sendFeedback(text("§e[창고지기] 사용법: /chestbot license <라이선스키>  또는  /창고봇 라이선스 <키>"));
-                            ctx.getSource().sendFeedback(text("§7섬장만 라이선스 키로 연결하세요. 팀원은 발급된 조인코드로 /창고봇 연결 을 사용합니다."));
-                            return 0;
+                            BotBridge bridge = ChestBotMod.getBridge();
+                            ctx.getSource().sendFeedback(text("§6[창고지기] 현재 서버 주소: §f" + bridge.getServerUrl()));
+                            ctx.getSource().sendFeedback(text("§7변경: /" + root + " " + server + " <http(s)://주소>  |  초기화: /" + root + " " + server + " reset"));
+                            return 1;
                         })
-                        .then(ClientCommandManager.argument("key", StringArgumentType.word())
+                        .then(ClientCommandManager.argument("url", StringArgumentType.greedyString())
                                 .executes(ctx -> {
-                                    String key = StringArgumentType.getString(ctx, "key");
-                                    ctx.getSource().sendFeedback(text("§7[창고지기] 라이선스 인증 중..."));
-                                    runAsync(ctx.getSource(), ChestBotMod.getBridge().connectWithLicenseAsync(key), ok -> {
-                                        BotBridge bridge = ChestBotMod.getBridge();
-                                        if (ok) {
-                                            ctx.getSource().sendFeedback(text(
-                                                    "§a[창고지기] ✅ 라이선스 인증 성공! 섬: §f" + bridge.getIslandName()
-                                                    + " §7| 조인코드: §f" + bridge.getIslandCode()
-                                                    + " §7| chest §f" + bridge.getChestMap().size() + "§7개"));
-                                            ctx.getSource().sendFeedback(text(
-                                                    "§e팀원에게 조인코드 §f" + bridge.getIslandCode() + "§e 를 공유하세요."));
-                                        } else {
-                                            String err = bridge.getLastConnectError();
-                                            String msg = (err != null) ? err : "라이선스 인증 실패. 관리자에게 문의하세요.";
-                                            ctx.getSource().sendFeedback(text("§c[창고지기] ❌ " + msg));
-                                        }
-                                    });
+                                    String url = StringArgumentType.getString(ctx, "url");
+                                    BotBridge bridge = ChestBotMod.getBridge();
+                                    if (url.equalsIgnoreCase("reset") || url.equals(reset)) {
+                                        bridge.resetServerUrl();
+                                        ctx.getSource().sendFeedback(text("§e[창고지기] 서버 주소를 기본값으로 되돌렸습니다: §f" + bridge.getServerUrl()));
+                                        ctx.getSource().sendFeedback(text("§7필요하면 /" + root + " " + connect + " 로 다시 연결하세요."));
+                                        return 1;
+                                    }
+                                    if (!bridge.setServerUrl(url)) {
+                                        ctx.getSource().sendFeedback(text("§c[창고지기] 서버 주소 형식이 올바르지 않습니다. http:// 또는 https:// 로 시작해야 합니다."));
+                                        return 0;
+                                    }
+                                    ctx.getSource().sendFeedback(text("§a[창고지기] ✅ 서버 주소 저장 완료: §f" + bridge.getServerUrl()));
+                                    ctx.getSource().sendFeedback(text("§7이제 /" + root + " " + connect + " 로 새 서버에 연결하세요."));
                                     return 1;
                                 })))
 
@@ -150,17 +174,17 @@ public class ChestBotCommand {
                                     String adminCode  = StringArgumentType.getString(ctx, "adminCode");
                                     BotBridge bridge  = ChestBotMod.getBridge();
 
-                                    if (bridge.getIslandCode() == null) {
-                                        ctx.getSource().sendFeedback(text("§c[창고지기] 먼저 /chestbot connect <코드> 로 연결하세요."));
+                                    if (!bridge.isConnected()) {
+                                        ctx.getSource().sendFeedback(text("§c[창고지기] 먼저 /" + root + " " + connect + " 로 연결하세요."));
                                         return 0;
                                     }
 
                                     ctx.getSource().sendFeedback(text("§7[창고지기] 관리자 모드 진입 중..."));
-                                    runAsync(ctx.getSource(), bridge.enterAdminModeAsync(bridge.getIslandCode(), adminCode), ok -> {
+                                    runAsync(ctx.getSource(), bridge.enterAdminModeAsync(adminCode), ok -> {
                                         if (ok) {
                                             ctx.getSource().sendFeedback(text(
                                                     "§a[창고지기] ✅ 관리자 모드! 섬: §f" + bridge.getAdminIslandName() + "\n"
-                                                    + "§7/chestbot add <이름> 또는 /창고봇 추가 <이름> 후 상자를 클릭하면 바로 저장됩니다."));
+                                                            + "§7/" + root + " " + add + " <이름> 후 상자를 클릭하면 바로 저장됩니다."));
                                         } else {
                                             ctx.getSource().sendFeedback(text("§c[창고지기] ❌ 관리자 코드가 유효하지 않습니다."));
                                         }
@@ -173,7 +197,7 @@ public class ChestBotCommand {
                                 .executes(ctx -> {
                                     BotBridge bridge = ChestBotMod.getBridge();
                                     if (!bridge.isAdminMode()) {
-                                        ctx.getSource().sendFeedback(text("§c[창고지기] 관리자 모드가 아닙니다. /chestbot admin 을 먼저 실행하세요."));
+                                        ctx.getSource().sendFeedback(text("§c[창고지기] 관리자 모드가 아닙니다. /" + root + " " + admin + " 을 먼저 실행하세요."));
                                         return 0;
                                     }
 
@@ -235,8 +259,77 @@ public class ChestBotCommand {
                                         ctx.getSource().sendFeedback(text("§a[창고지기] ✅ 은행 거래 사유가 전송되었습니다."));
                                         return 1;
                                     }
-                                    ctx.getSource().sendFeedback(text("§c[창고지기] 은행 거래 사유 전송 실패. 사유를 다시 확인하세요."));
-                                    return 0;
+                                     ctx.getSource().sendFeedback(text("§c[창고지기] 은행 거래 사유 전송 실패. 사유를 다시 확인하세요."));
+                                     return 0;
+                                 })))
+
+                .then(ClientCommandManager.literal(hud)
+                        .executes(ctx -> {
+                            BotBridge bridge = ChestBotMod.getBridge();
+                            ctx.getSource().sendFeedback(text("§6[창고지기 HUD] "
+                                    + (bridge.isHudEnabled() ? "활성화" : "비활성화")
+                                    + " §7| 위치: §f" + bridge.getHudX() + ", " + bridge.getHudY()
+                                    + " §7| 크기: §f" + String.format(java.util.Locale.ROOT, "%.2f", bridge.getHudScale())));
+                            if (korean) {
+                                ctx.getSource().sendFeedback(text("§7사용 예시: /창고봇 허드 수정모드, /창고봇 허드 크기 1.2, /창고봇 허드 토글"));
+                            }
+                            return 1;
+                        })
+                        .then(ClientCommandManager.literal(toggle)
+                                .executes(ctx -> {
+                                    BotBridge bridge = ChestBotMod.getBridge();
+                                    boolean next = !bridge.isHudEnabled();
+                                    bridge.setHudEnabled(next);
+                                    ctx.getSource().sendFeedback(text("§e[창고지기 HUD] " + (next ? "표시 켜짐" : "표시 꺼짐")));
+                                    return 1;
+                                }))
+                        .then(ClientCommandManager.literal(edit)
+                                .executes(ctx -> {
+                                    BotBridge bridge = ChestBotMod.getBridge();
+                                    bridge.setHudEnabled(true);
+                                    bridge.setHudEditMode(true);
+                                    MinecraftClient client = MinecraftClient.getInstance();
+                                    client.send(() -> {
+                                        if (!(client.currentScreen instanceof ChestBotHudEditScreen)) {
+                                            client.setScreen(new ChestBotHudEditScreen());
+                                        }
+                                    });
+                                    if (korean) {
+                                        ctx.getSource().sendFeedback(text("§e[창고지기 HUD] 수정 화면을 엽니다. 드래그로 이동하고 +/- 로 크기 조절 후 ESC 로 닫으세요."));
+                                    } else {
+                                        ctx.getSource().sendFeedback(text("§e[ChestBot HUD] Opening editor. Drag to move, use +/- to resize, press ESC to close."));
+                                    }
+                                    return 1;
+                                }))
+                        .then(ClientCommandManager.literal(position)
+                                .then(ClientCommandManager.argument("x", IntegerArgumentType.integer(0))
+                                        .then(ClientCommandManager.argument("y", IntegerArgumentType.integer(0))
+                                                .executes(ctx -> {
+                                                    int x = IntegerArgumentType.getInteger(ctx, "x");
+                                                    int y = IntegerArgumentType.getInteger(ctx, "y");
+                                                    BotBridge bridge = ChestBotMod.getBridge();
+                                                    bridge.setHudPosition(x, y);
+                                                    ctx.getSource().sendFeedback(text("§e[창고지기 HUD] 위치 변경: §f" + x + ", " + y));
+                                                    return 1;
+                                                }))))
+                        .then(ClientCommandManager.literal(scale)
+                                .then(ClientCommandManager.argument("value", DoubleArgumentType.doubleArg(0.5D, 3.0D))
+                                        .executes(ctx -> {
+                                            float value = (float) DoubleArgumentType.getDouble(ctx, "value");
+                                            BotBridge bridge = ChestBotMod.getBridge();
+                                            bridge.setHudScale(value);
+                                            ctx.getSource().sendFeedback(text("§e[창고지기 HUD] 크기 변경: §f"
+                                                    + String.format(java.util.Locale.ROOT, "%.2f", bridge.getHudScale())));
+                                            return 1;
+                                        })))
+                        .then(ClientCommandManager.literal(reset)
+                                .executes(ctx -> {
+                                    BotBridge bridge = ChestBotMod.getBridge();
+                                    bridge.setHudEnabled(true);
+                                    bridge.setHudPosition(8, 8);
+                                    bridge.setHudScale(1.0F);
+                                    ctx.getSource().sendFeedback(text("§e[창고지기 HUD] 위치/크기가 기본값으로 초기화되었습니다."));
+                                    return 1;
                                 })))
 
                 ;

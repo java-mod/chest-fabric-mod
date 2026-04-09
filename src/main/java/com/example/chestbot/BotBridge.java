@@ -1,10 +1,14 @@
 package com.example.chestbot;
 
+import com.example.chestbot.hud.ChestHudItemVisuals;
 import com.google.gson.*;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.AbstractClientPlayerEntity;
 import net.minecraft.util.math.BlockPos;
 
 import java.io.FileReader;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.http.*;
 import java.nio.charset.StandardCharsets;
@@ -13,6 +17,7 @@ import java.time.Duration;
 import java.util.Locale;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 서버와의 HTTP 통신 및 island 설정을 관리한다.
@@ -20,29 +25,37 @@ import java.util.concurrent.CompletableFuture;
  * <p>설정 파일: {@code config/chestbot.json}</p>
  * <ul>
  *   <li>{@code server_url} — 백엔드 서버 주소</li>
- *   <li>{@code island_code} — 참여 코드 (인게임 /창고봇 연결로 저장)</li>
  * </ul>
  */
 public class BotBridge {
 
     private static final String DEFAULT_URL = "https://chestbot.kro.kr";
+    private static final long HUD_REFRESH_INTERVAL_MILLIS = 10_000L;
 
     // ── 설정 (파일에서 로드) ────────────────────────────────────
     private String serverUrl;
-    private String islandCode;
-    private String licenseKey;
 
     // ── 런타임 상태 ─────────────────────────────────────────────
     private String islandName;
     private long configVersion;
     private final Map<String, BlockPos> chestMap = new LinkedHashMap<>();
     private String lastConnectError;
+    private boolean hudEnabled = true;
+    private int hudX = 8;
+    private int hudY = 8;
+    private float hudScale = 1.0F;
+    private boolean hudEditMode;
+    private RecentChestHudEntry recentChestHudEntry;
+    private final List<MemberHudEntry> memberHudEntries = new ArrayList<>();
+    private final Map<String, LocalHudHolding> localHudHoldings = new LinkedHashMap<>();
+    private CompletableFuture<Boolean> pendingReloadFuture;
+    private long lastHudRefreshRequestedAtMillis;
+    private final AtomicLong connectionVersion = new AtomicLong();
 
     // ── 관리자 모드 상태 ────────────────────────────────────────
     private boolean adminMode;
     private String adminIslandName;
     private String pendingAdminCode;
-    private String pendingJoinCode;
     private String pendingChestSelectionName;
     private BlockPos lastInteractedChestPos;
     private long lastInteractedChestAtMillis;
@@ -60,23 +73,13 @@ public class BotBridge {
     // ── 서버 연결 시 자동 bootstrap ─────────────────────────────
 
     public void start() {
-        if (licenseKey != null && !licenseKey.isBlank()) {
-            connectWithLicense(licenseKey);
-        } else if (islandCode != null && !islandCode.isBlank()) {
-            connectWithCode(islandCode);
-        } else {
-            log("서버에 연결되지 않음. /창고봇 라이선스 <키> 또는 /창고봇 연결 <코드> 를 입력하세요.");
-        }
+        long version = connectionVersion.get();
+        connect(version);
     }
 
     public void startAsync() {
-        if (licenseKey != null && !licenseKey.isBlank()) {
-            connectWithLicenseAsync(licenseKey);
-        } else if (islandCode != null && !islandCode.isBlank()) {
-            connectWithCodeAsync(islandCode);
-        } else {
-            log("서버에 연결되지 않음. /창고봇 라이선스 <키> 또는 /창고봇 연결 <코드> 를 입력하세요.");
-        }
+        long version = connectionVersion.get();
+        CompletableFuture.supplyAsync(() -> connect(version));
     }
 
     public void stop() {
@@ -85,48 +88,57 @@ public class BotBridge {
         adminMode = false;
         adminIslandName = null;
         pendingAdminCode = null;
-        pendingJoinCode = null;
         pendingChests.clear();
         lastInteractedChestPos = null;
         lastInteractedChestAtMillis = 0L;
         pendingChestSelectionName = null;
         pendingBankTransaction = null;
+        recentChestHudEntry = null;
+        memberHudEntries.clear();
+        localHudHoldings.clear();
+        pendingReloadFuture = null;
+        lastHudRefreshRequestedAtMillis = 0L;
     }
 
-    // ── 참여 코드로 섬 연결 ──────────────────────────────────────
+    // ── 서버 기준 섬 연결 ────────────────────────────────────────
 
-    public boolean connectWithCode(String code) {
-        String normalizedCode = normalizeJoinCode(code);
-        JsonObject body = new JsonObject();
-        body.addProperty("joinCode", normalizedCode);
+    public boolean connect() {
+        long version = connectionVersion.incrementAndGet();
+        return connect(version);
+    }
 
-        HttpResult result = postJson("/api/v1/client/connect", body);
+    private boolean connect(long version) {
+        HttpResult result = postNoBody("/api/v1/client/connect");
         if (!result.success()) {
             log(result.describeFailure());
             if (result.statusCode() == 403) {
                 clearAndSaveConfig();
-                log("라이선스 비활성화: 연결 정보를 초기화했습니다.");
+                log("서버에서 연결이 거부되어 연결 정보를 초기화했습니다.");
             }
             return false;
         }
 
         try {
             JsonObject json = JsonParser.parseString(result.body()).getAsJsonObject();
-            islandName    = json.get("islandName").getAsString();
-            configVersion = json.get("configVersion").getAsLong();
+            String nextIslandName = json.get("islandName").getAsString();
+            long nextConfigVersion = json.get("configVersion").getAsLong();
 
-            chestMap.clear();
+            LinkedHashMap<String, BlockPos> nextChestMap = new LinkedHashMap<>();
             JsonArray chests = json.getAsJsonArray("chests");
             for (JsonElement el : chests) {
                 JsonObject c = el.getAsJsonObject();
-                chestMap.put(
+                nextChestMap.put(
                         c.get("chestKey").getAsString(),
                         new BlockPos(c.get("x").getAsInt(), c.get("y").getAsInt(), c.get("z").getAsInt())
                 );
             }
+            List<MemberHudEntry> nextMemberEntries = parseMemberHudEntries(json);
 
-            islandCode = normalizedCode;
-            saveConfig();
+            if (!commitConnectionState(version,
+                    nextIslandName, nextConfigVersion, nextChestMap, nextMemberEntries)) {
+                return false;
+            }
+
             log("연결 성공! 섬: " + islandName + " | chest " + chestMap.size() + "개 (버전 " + configVersion + ")");
             return true;
         } catch (Exception e) {
@@ -137,94 +149,29 @@ public class BotBridge {
 
     /** 403 수신 시 호출 — 모든 연결 정보를 초기화하고 config 파일을 저장한다. */
     private void clearAndSaveConfig() {
-        licenseKey    = null;
-        islandCode    = null;
         islandName    = null;
         configVersion = 0L;
         chestMap.clear();
+        memberHudEntries.clear();
         saveConfig();
     }
 
-    public CompletableFuture<Boolean> connectWithCodeAsync(String code) {
-        return CompletableFuture.supplyAsync(() -> connectWithCode(code));
-    }
-
-    // ── 라이선스 키로 섬 연결 (섬장 전용) ────────────────────────
-
-    public boolean connectWithLicense(String key) {
-        lastConnectError = null;
-        JsonObject body = new JsonObject();
-        body.addProperty("licenseKey", key.trim().toUpperCase());
-
-        HttpResult result = postJson("/api/v1/client/connect/license", body);
-        if (!result.success()) {
-            log(result.describeFailure());
-            if (result.statusCode() == 401) {
-                lastConnectError = "등록되지 않은 라이선스 키입니다. 키를 다시 확인하세요.";
-            } else if (result.statusCode() == 403) {
-                String serverMsg = parseServerMessage(result.body());
-                lastConnectError = serverMsg + "\n§e관리자에게 문의하세요.";
-                clearAndSaveConfig();
-                log("라이선스 인증 실패(403): 연결 정보를 초기화했습니다.");
-            } else if (result.statusCode() == -1) {
-                lastConnectError = "서버에 연결할 수 없습니다. 잠시 후 다시 시도하세요.";
-            } else {
-                lastConnectError = "라이선스 인증 실패 (코드 " + result.statusCode() + "). 관리자에게 문의하세요.";
-            }
-            return false;
-        }
-
-        try {
-            JsonObject json = JsonParser.parseString(result.body()).getAsJsonObject();
-            islandName    = json.get("islandName").getAsString();
-            islandCode    = json.get("joinCode").getAsString();
-            configVersion = json.get("configVersion").getAsLong();
-            licenseKey    = key.trim().toUpperCase();
-
-            chestMap.clear();
-            JsonArray chests = json.getAsJsonArray("chests");
-            for (JsonElement el : chests) {
-                JsonObject c = el.getAsJsonObject();
-                chestMap.put(
-                        c.get("chestKey").getAsString(),
-                        new BlockPos(c.get("x").getAsInt(), c.get("y").getAsInt(), c.get("z").getAsInt())
-                );
-            }
-
-            saveConfig();
-            log("라이선스 연결 성공! 섬: " + islandName + " | 조인코드: " + islandCode
-                    + " | chest " + chestMap.size() + "개 (버전 " + configVersion + ")");
-            return true;
-        } catch (Exception e) {
-            log("라이선스 연결 응답 파싱 오류: " + e.getMessage());
-            lastConnectError = "서버 응답 처리 중 오류가 발생했습니다.";
-            return false;
-        }
-    }
-
-    /** 서버 에러 응답 JSON의 {@code message} 필드를 추출한다. 파싱 실패 시 기본 메시지를 반환한다. */
-    private static String parseServerMessage(String body) {
-        if (body == null || body.isBlank()) return "라이선스 인증에 실패했습니다.";
-        try {
-            JsonObject err = JsonParser.parseString(body).getAsJsonObject();
-            if (err.has("message") && !err.get("message").isJsonNull()) {
-                return err.get("message").getAsString();
-            }
-        } catch (Exception ignored) {}
-        return "라이선스 인증에 실패했습니다.";
-    }
-
-    public CompletableFuture<Boolean> connectWithLicenseAsync(String key) {
-        return CompletableFuture.supplyAsync(() -> connectWithLicense(key));
+    public CompletableFuture<Boolean> connectAsync() {
+        long version = connectionVersion.incrementAndGet();
+        return CompletableFuture.supplyAsync(() -> connect(version));
     }
 
     // ── 관리자 모드 ──────────────────────────────────────────────
 
-    public boolean enterAdminMode(String joinCode, String adminCode) {
-        String normalizedJoinCode = normalizeJoinCode(joinCode);
+    public boolean enterAdminMode(String adminCode) {
+        String normalizedAdminCode = normalizeAdminCode(adminCode);
+        if (normalizedAdminCode == null || normalizedAdminCode.isBlank()) {
+            log("관리자 코드가 비어 있습니다.");
+            return false;
+        }
+
         JsonObject body = new JsonObject();
-        body.addProperty("joinCode", normalizedJoinCode);
-        body.addProperty("adminCode", adminCode);
+        body.addProperty("adminCode", normalizedAdminCode);
 
         String response = postSync("/api/v1/client/admin/connect", body);
         if (response == null) return false;
@@ -232,8 +179,7 @@ public class BotBridge {
         try {
             JsonObject json = JsonParser.parseString(response).getAsJsonObject();
             adminIslandName  = json.get("islandName").getAsString();
-            pendingAdminCode = adminCode;
-            pendingJoinCode  = normalizedJoinCode;
+            pendingAdminCode = normalizedAdminCode;
             adminMode        = true;
             pendingChestSelectionName = null;
             pendingChests.clear();
@@ -245,8 +191,8 @@ public class BotBridge {
         }
     }
 
-    public CompletableFuture<Boolean> enterAdminModeAsync(String joinCode, String adminCode) {
-        return CompletableFuture.supplyAsync(() -> enterAdminMode(joinCode, adminCode));
+    public CompletableFuture<Boolean> enterAdminModeAsync(String adminCode) {
+        return CompletableFuture.supplyAsync(() -> enterAdminMode(adminCode));
     }
 
     public CompletableFuture<Boolean> finalizeAdminModeAsync() {
@@ -320,7 +266,6 @@ public class BotBridge {
 
     public boolean finalizeAdminMode() {
         JsonObject body = new JsonObject();
-        body.addProperty("joinCode", pendingJoinCode);
         body.addProperty("adminCode", pendingAdminCode);
 
         JsonArray chestArray = new JsonArray();
@@ -351,12 +296,12 @@ public class BotBridge {
                         new BlockPos(c.get("x").getAsInt(), c.get("y").getAsInt(), c.get("z").getAsInt())
                 );
             }
+            replaceMemberHudEntries(json);
             log("완료! chest " + chestMap.size() + "개 저장됨 (버전 " + configVersion + ")");
         } catch (Exception ignored) {}
 
         adminMode        = false;
         pendingAdminCode = null;
-        pendingJoinCode  = null;
         pendingChestSelectionName = null;
         pendingChests.clear();
         return true;
@@ -365,19 +310,23 @@ public class BotBridge {
     // ── chest 이벤트 전송 ────────────────────────────────────────
 
     public void sendChestLog(String player, String chestName,
-                             Map<String, Integer> taken, Map<String, Integer> added) {
-        if (islandCode == null || islandCode.isBlank()) {
+                             Map<String, Integer> taken, Map<String, Integer> added,
+                             String takenVisualData, String addedVisualData) {
+        if (!isConnected()) {
             log("chest 로그 스킵: 섬 연결 정보가 없습니다.");
             return;
         }
 
         JsonObject body = new JsonObject();
-        body.addProperty("joinCode",      islandCode);
         body.addProperty("configVersion", configVersion);
         body.addProperty("playerName",    player);
+        body.addProperty("playerUuid", collectCurrentPlayerProfile(player).has("uuid") ? collectCurrentPlayerProfile(player).get("uuid").getAsString() : "");
         body.addProperty("chestKey",      chestName);
+        if (takenVisualData != null) body.addProperty("takenVisualData", takenVisualData);
+        if (addedVisualData != null) body.addProperty("addedVisualData", addedVisualData);
         body.add("taken", toJsonObject(taken));
         body.add("added", toJsonObject(added));
+        appendCurrentPlayerProfile(body, player);
 
         postAsync("/api/v1/client/events/chest-log", body,
                 "chest-log(" + chestName + ", player=" + player + ")");
@@ -404,7 +353,7 @@ public class BotBridge {
     }
 
     public void sendIslandBankLog(String playerName, String transactionType, String amountText, String reason, String sourceMessage, boolean awaitingReason) {
-        if (islandCode == null || islandCode.isBlank()) {
+        if (!isConnected()) {
             log("섬 은행 로그 스킵: 섬 연결 정보가 없습니다.");
             return;
         }
@@ -420,7 +369,6 @@ public class BotBridge {
         }
 
         JsonObject body = new JsonObject();
-        body.addProperty("joinCode", islandCode);
         body.addProperty("playerName", playerName);
         body.addProperty("transactionType", transactionType);
         body.addProperty("amount", amount);
@@ -432,6 +380,7 @@ public class BotBridge {
         } else {
             body.add("note", JsonNull.INSTANCE);
         }
+        appendCurrentPlayerProfile(body, playerName);
 
         postAsync("/api/v1/client/events/island-bank-log", body,
                 "bank-log(player=" + playerName + ", type=" + transactionType + ", amount=" + amountText + ")");
@@ -469,13 +418,202 @@ public class BotBridge {
         return Collections.unmodifiableMap(chestMap);
     }
 
+    public boolean isHudEnabled() {
+        return hudEnabled;
+    }
+
+    public void setHudEnabled(boolean hudEnabled) {
+        this.hudEnabled = hudEnabled;
+        saveConfig();
+    }
+
+    public int getHudX() {
+        return hudX;
+    }
+
+    public int getHudY() {
+        return hudY;
+    }
+
+    public float getHudScale() {
+        return hudScale;
+    }
+
+    public boolean isHudEditMode() {
+        return hudEditMode;
+    }
+
+    public void setHudPosition(int x, int y) {
+        applyHudLayout(x, y, hudScale);
+        saveConfig();
+    }
+
+    public void setHudScale(float scale) {
+        applyHudLayout(hudX, hudY, scale);
+        saveConfig();
+    }
+
+    public void applyHudLayout(int x, int y, float scale) {
+        this.hudX = Math.max(0, x);
+        this.hudY = Math.max(0, y);
+        this.hudScale = clamp(scale, 0.5F, 3.0F);
+    }
+
+    public void persistHudLayout() {
+        saveConfig();
+    }
+
+    public void setHudEditMode(boolean hudEditMode) {
+        this.hudEditMode = hudEditMode;
+    }
+
+    public Optional<RecentChestHudEntry> getRecentChestHudEntry() {
+        return Optional.ofNullable(recentChestHudEntry);
+    }
+
+    public List<MemberHudEntry> getHudEntries() {
+        LinkedHashMap<String, MemberHudEntry> merged = new LinkedHashMap<>();
+
+        for (MemberHudEntry entry : memberHudEntries) {
+            if (entry == null || entry.playerName() == null || entry.playerName().isBlank()) {
+                continue;
+            }
+            merged.put(normalizeHudEntryKey(entry.playerName()), entry);
+        }
+
+        getRecentChestHudEntry()
+                .map(this::toMemberHudEntry)
+                .ifPresent(entry -> merged.put(normalizeHudEntryKey(entry.playerName()), entry));
+
+        return List.copyOf(merged.values());
+    }
+
+    public void rememberRecentChestHudEntry(String playerName, String chestName, Map<String, Integer> taken, Map<String, Integer> added,
+                                            String takenVisualData, String addedVisualData) {
+        if (playerName == null || playerName.isBlank()) {
+            return;
+        }
+        applyLocalHudTaken(chestName, taken, takenVisualData);
+        applyLocalHudAdded(added);
+        rebuildRecentHudEntry(playerName);
+    }
+
+    private void applyLocalHudTaken(String chestName, Map<String, Integer> diff, String visualData) {
+        if (diff == null || diff.isEmpty()) {
+            return;
+        }
+
+        for (Map.Entry<String, Integer> entry : diff.entrySet()) {
+            String itemName = ChestHudItemVisuals.formatItemName(entry.getKey());
+            int count = Math.max(entry.getValue() == null ? 0 : entry.getValue(), 0);
+            if (count <= 0) {
+                continue;
+            }
+
+            LocalHudHolding holding = localHudHoldings.getOrDefault(itemName, new LocalHudHolding(itemName, 0, visualData, chestName, System.currentTimeMillis()));
+            int nextCount = holding.netCount() + count;
+
+            String nextVisual = visualData != null && !visualData.isBlank() ? visualData : holding.itemVisualData();
+            String nextChest = chestName != null && !chestName.isBlank() ? chestName : holding.chestName();
+            localHudHoldings.put(itemName, new LocalHudHolding(itemName, nextCount, nextVisual, nextChest, System.currentTimeMillis()));
+        }
+    }
+
+    private void applyLocalHudAdded(Map<String, Integer> diff) {
+        if (diff == null || diff.isEmpty() || localHudHoldings.isEmpty()) {
+            return;
+        }
+
+        for (Map.Entry<String, Integer> entry : diff.entrySet()) {
+            String itemName = ChestHudItemVisuals.formatItemName(entry.getKey());
+            LocalHudHolding holding = localHudHoldings.get(itemName);
+            if (holding == null) {
+                continue;
+            }
+
+            int count = Math.max(entry.getValue() == null ? 0 : entry.getValue(), 0);
+            if (count <= 0) {
+                continue;
+            }
+
+            int nextCount = holding.netCount() - count;
+            if (nextCount <= 0) {
+                localHudHoldings.remove(itemName);
+                continue;
+            }
+
+            localHudHoldings.put(itemName, new LocalHudHolding(
+                    holding.itemName(),
+                    nextCount,
+                    holding.itemVisualData(),
+                    holding.chestName(),
+                    System.currentTimeMillis()
+            ));
+        }
+    }
+
+    private void rebuildRecentHudEntry(String playerName) {
+        if (localHudHoldings.isEmpty()) {
+            recentChestHudEntry = null;
+            return;
+        }
+
+        List<LocalHudHolding> sortedHoldings = localHudHoldings.values().stream()
+                .sorted(Comparator.comparingLong(LocalHudHolding::updatedAtMillis).reversed()
+                        .thenComparing(Comparator.comparingInt(LocalHudHolding::netCount).reversed())
+                        .thenComparing(LocalHudHolding::itemName))
+                .toList();
+        List<HudRotationItem> rotationItems = sortedHoldings.stream()
+                .map(holding -> new HudRotationItem(
+                        holding.itemName(),
+                        holding.netCount(),
+                        holding.itemVisualData()))
+                .toList();
+        if (sortedHoldings.isEmpty() || rotationItems.isEmpty()) {
+            recentChestHudEntry = null;
+            return;
+        }
+
+        LocalHudHolding representative = sortedHoldings.getFirst();
+
+        int totalKinds = localHudHoldings.size();
+        int totalItems = localHudHoldings.values().stream().mapToInt(LocalHudHolding::netCount).sum();
+        recentChestHudEntry = new RecentChestHudEntry(
+                playerName,
+                representative.chestName(),
+                representative.itemName(),
+                representative.netCount(),
+                totalKinds,
+                totalItems,
+                representative.itemVisualData(),
+                rotationItems,
+                currentPlayerSkinTexture(),
+                System.currentTimeMillis()
+        );
+    }
+
+    private MemberHudEntry toMemberHudEntry(RecentChestHudEntry entry) {
+        return new MemberHudEntry(
+                entry.playerName(),
+                entry.itemName(),
+                entry.itemCount(),
+                entry.totalKinds(),
+                entry.totalItems(),
+                entry.itemVisualData(),
+                entry.rotationItems(),
+                entry.chestName(),
+                entry.skinTexture(),
+                null,
+                entry.createdAtMillis()
+        );
+    }
+
     // ── 상태 정보 ────────────────────────────────────────────────
 
-    public boolean isConnected()    { return islandCode != null && islandName != null; }
+    public boolean isConnected()    { return islandName != null; }
     public boolean isAdminMode()    { return adminMode; }
-    public String  getIslandCode()  { return islandCode; }
+    public String  getServerUrl()   { return serverUrl; }
     public String  getIslandName()  { return islandName; }
-    public String  getLicenseKey()      { return licenseKey; }
     public String  getLastConnectError() { return lastConnectError; }
     public String  getAdminIslandName() { return adminIslandName; }
     public long    getConfigVersion() { return configVersion; }
@@ -484,21 +622,72 @@ public class BotBridge {
     // ── 설정 파일 ────────────────────────────────────────────────
 
     public boolean reload() {
-        if (licenseKey != null && !licenseKey.isBlank()) {
-            return connectWithLicense(licenseKey);
+        long version = connectionVersion.get();
+        return connect(version);
+    }
+
+    public boolean setServerUrl(String nextUrl) {
+        if (nextUrl == null) {
+            return false;
         }
-        return islandCode != null && connectWithCode(islandCode);
+
+        String normalized = normalizeServerUrl(nextUrl);
+        if (normalized == null) {
+            return false;
+        }
+
+        serverUrl = normalized;
+        stop();
+        saveConfig();
+        return true;
+    }
+
+    public void resetServerUrl() {
+        serverUrl = DEFAULT_URL;
+        stop();
+        saveConfig();
     }
 
     public CompletableFuture<Boolean> reloadAsync() {
-        return CompletableFuture.supplyAsync(this::reload);
+        synchronized (this) {
+            if (pendingReloadFuture != null && !pendingReloadFuture.isDone()) {
+                return pendingReloadFuture;
+            }
+
+            CompletableFuture<Boolean> future = CompletableFuture.supplyAsync(this::reload);
+            pendingReloadFuture = future;
+            future.whenComplete((result, error) -> {
+                synchronized (BotBridge.this) {
+                    if (pendingReloadFuture == future) {
+                        pendingReloadFuture = null;
+                    }
+                }
+            });
+            return future;
+        }
+    }
+
+    public void tickHudRefresh() {
+        if (!isConnected() || !hudEnabled || adminMode) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now - lastHudRefreshRequestedAtMillis < HUD_REFRESH_INTERVAL_MILLIS) {
+            return;
+        }
+
+        lastHudRefreshRequestedAtMillis = now;
+        reloadAsync();
     }
 
     private void loadConfig() {
         Path path = Path.of("config", "chestbot.json");
         serverUrl  = DEFAULT_URL;
-        islandCode = null;
-        licenseKey = null;
+        hudEnabled = true;
+        hudX = 8;
+        hudY = 8;
+        hudScale = 1.0F;
 
         if (Files.exists(path)) {
             try {
@@ -506,18 +695,24 @@ public class BotBridge {
                 if (cfg.has("server_url")) {
                     serverUrl = cfg.get("server_url").getAsString().trim();
                 }
-                if (cfg.has("island_code") && !cfg.get("island_code").isJsonNull()) {
-                    islandCode = cfg.get("island_code").getAsString();
+                if (cfg.has("hud_enabled") && !cfg.get("hud_enabled").isJsonNull()) {
+                    hudEnabled = cfg.get("hud_enabled").getAsBoolean();
                 }
-                if (cfg.has("license_key") && !cfg.get("license_key").isJsonNull()) {
-                    licenseKey = cfg.get("license_key").getAsString();
+                if (cfg.has("hud_x") && !cfg.get("hud_x").isJsonNull()) {
+                    hudX = Math.max(0, cfg.get("hud_x").getAsInt());
+                }
+                if (cfg.has("hud_y") && !cfg.get("hud_y").isJsonNull()) {
+                    hudY = Math.max(0, cfg.get("hud_y").getAsInt());
+                }
+                if (cfg.has("hud_scale") && !cfg.get("hud_scale").isJsonNull()) {
+                    hudScale = clamp(cfg.get("hud_scale").getAsFloat(), 0.5F, 3.0F);
                 }
             } catch (Exception e) {
                 log("config 로드 오류: " + e.getMessage());
             }
         } else {
             saveConfig();
-            log("config/chestbot.json 생성됨. /창고봇 라이선스 <키> 로 연결하거나 /창고봇 연결 <코드> 를 사용하세요.");
+            log("config/chestbot.json 생성됨. /창고봇 서버 <주소> 후 /창고봇 연결 을 사용하세요.");
         }
     }
 
@@ -527,14 +722,44 @@ public class BotBridge {
             Files.createDirectories(path.getParent());
             JsonObject cfg = new JsonObject();
             cfg.addProperty("server_url", serverUrl);
-            if (licenseKey != null) cfg.addProperty("license_key", licenseKey);
-            else cfg.add("license_key", JsonNull.INSTANCE);
-            if (islandCode != null) cfg.addProperty("island_code", islandCode);
-            else cfg.add("island_code", JsonNull.INSTANCE);
+            cfg.addProperty("hud_enabled", hudEnabled);
+            cfg.addProperty("hud_x", hudX);
+            cfg.addProperty("hud_y", hudY);
+            cfg.addProperty("hud_scale", hudScale);
             Files.writeString(path, new GsonBuilder().setPrettyPrinting().create().toJson(cfg));
         } catch (IOException e) {
             log("config 저장 오류: " + e.getMessage());
         }
+    }
+
+    private static String normalizeServerUrl(String rawUrl) {
+        String trimmed = rawUrl == null ? null : rawUrl.trim();
+        if (trimmed == null || trimmed.isBlank()) {
+            return null;
+        }
+
+        String normalized = trimmed;
+        if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
+            if (!looksLikeHostOrIp(normalized)) {
+                return null;
+            }
+            normalized = "http://" + normalized;
+        }
+
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    private static boolean looksLikeHostOrIp(String value) {
+        if (value == null || value.isBlank() || value.contains(" ") || value.contains("/")) {
+            return false;
+        }
+
+        return value.equalsIgnoreCase("localhost")
+                || value.matches("\\d{1,3}(\\.\\d{1,3}){3}(:\\d{1,5})?")
+                || value.matches("[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}(:\\d{1,5})?");
     }
 
     // ── HTTP ─────────────────────────────────────────────────────
@@ -546,6 +771,20 @@ public class BotBridge {
             return null;
         }
         return result.body();
+    }
+
+    private HttpResult postNoBody(String path) {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(serverUrl + path))
+                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
+            HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
+            return new HttpResult(path, res.statusCode(), res.body(), null);
+        } catch (Exception e) {
+            return new HttpResult(path, -1, null, e.getMessage());
+        }
     }
 
     private HttpResult postJson(String path, JsonObject body) {
@@ -574,9 +813,9 @@ public class BotBridge {
                     return;
                 }
 
-                // 403: 라이선스 비활성화 — 재시도 없이 즉시 초기화
+                // 403: 서버에서 연결 거부 — 재시도 없이 즉시 초기화
                 if (result.statusCode() == 403) {
-                    log(context + " 전송 실패: 라이선스가 비활성화되었습니다. 연결 정보를 초기화합니다.");
+                    log(context + " 전송 실패: 서버가 연결을 거부했습니다. 연결 정보를 초기화합니다.");
                     clearAndSaveConfig();
                     return;
                 }
@@ -603,6 +842,381 @@ public class BotBridge {
         return obj;
     }
 
+    private List<MemberHudEntry> parseMemberHudEntries(JsonObject json) {
+        List<MemberHudEntry> parsedEntries = new ArrayList<>();
+        JsonArray members = firstArray(json,
+                "hudMembers",
+                "members",
+                "memberHudEntries",
+                "hudEntries");
+        if (members == null) {
+            return parsedEntries;
+        }
+
+        long now = System.currentTimeMillis();
+        for (JsonElement element : members) {
+            if (element == null || !element.isJsonObject()) {
+                continue;
+            }
+
+            JsonObject member = element.getAsJsonObject();
+            JsonObject profile = firstObject(member, "playerProfile", "profile");
+
+            String playerName = firstString(member, "playerName", "name", "nickname");
+            if (playerName == null && profile != null) {
+                playerName = firstString(profile, "name", "playerName", "nickname");
+            }
+
+            String itemName = firstString(member, "itemName", "item", "latestTakenItem", "takenItemName");
+            String itemVisualData = firstString(member, "itemVisualData", "visualData", "itemStackVisual", "itemIconData");
+            int itemCount = firstInt(member, 1, "itemCount", "count", "takenCount", "latestTakenCount");
+            int totalKinds = firstInt(member, itemName == null ? 0 : 1, "totalKinds", "takenKinds", "itemKinds");
+            int totalItems = firstInt(member, Math.max(itemCount, 0), "totalItems", "takenItems", "countTotal");
+            String chestName = firstString(member, "chestName", "chestKey", "storageName");
+            String skinTexture = firstString(member, "skinTexture");
+            if (skinTexture == null && profile != null) {
+                skinTexture = firstString(profile, "skinTexture");
+            }
+            String playerUuid = firstString(member, "playerUuid", "uuid");
+            if (playerUuid == null && profile != null) {
+                playerUuid = firstString(profile, "uuid", "playerUuid");
+            }
+            long updatedAtMillis = firstLong(member, now,
+                    "updatedAtMillis",
+                    "updatedAt",
+                    "createdAtMillis",
+                    "timestamp");
+
+            if (playerName == null || playerName.isBlank() || itemName == null || itemName.isBlank()) {
+                continue;
+            }
+
+            parsedEntries.add(new MemberHudEntry(
+                    playerName,
+                    itemName,
+                    Math.max(1, itemCount),
+                    Math.max(totalKinds, 1),
+                    Math.max(totalItems, Math.max(1, itemCount)),
+                    itemVisualData,
+                    List.of(new HudRotationItem(itemName, Math.max(1, itemCount), itemVisualData)),
+                    chestName,
+                    skinTexture,
+                    playerUuid,
+                    updatedAtMillis
+            ));
+        }
+
+        return parsedEntries;
+    }
+
+    private void replaceMemberHudEntries(JsonObject json) {
+        memberHudEntries.clear();
+        memberHudEntries.addAll(parseMemberHudEntries(json));
+    }
+
+    private boolean commitConnectionState(long version,
+                                          String nextIslandName,
+                                          long nextConfigVersion,
+                                          Map<String, BlockPos> nextChestMap,
+                                          List<MemberHudEntry> nextMemberEntries) {
+        synchronized (this) {
+            if (connectionVersion.get() != version) {
+                return false;
+            }
+
+            islandName = nextIslandName;
+            configVersion = nextConfigVersion;
+            chestMap.clear();
+            chestMap.putAll(nextChestMap);
+            memberHudEntries.clear();
+            memberHudEntries.addAll(nextMemberEntries);
+            saveConfig();
+            return true;
+        }
+    }
+
+    private static JsonArray firstArray(JsonObject json, String... keys) {
+        if (json == null || keys == null) {
+            return null;
+        }
+        for (String key : keys) {
+            if (json.has(key) && json.get(key).isJsonArray()) {
+                return json.getAsJsonArray(key);
+            }
+        }
+        return null;
+    }
+
+    private static JsonObject firstObject(JsonObject json, String... keys) {
+        if (json == null || keys == null) {
+            return null;
+        }
+        for (String key : keys) {
+            if (json.has(key) && json.get(key).isJsonObject()) {
+                return json.getAsJsonObject(key);
+            }
+        }
+        return null;
+    }
+
+    private static String firstString(JsonObject json, String... keys) {
+        if (json == null || keys == null) {
+            return null;
+        }
+        for (String key : keys) {
+            if (!json.has(key) || json.get(key).isJsonNull()) {
+                continue;
+            }
+            try {
+                String value = json.get(key).getAsString();
+                if (value != null && !value.isBlank()) {
+                    return value;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static int firstInt(JsonObject json, int defaultValue, String... keys) {
+        if (json == null || keys == null) {
+            return defaultValue;
+        }
+        for (String key : keys) {
+            if (!json.has(key) || json.get(key).isJsonNull()) {
+                continue;
+            }
+            try {
+                return json.get(key).getAsInt();
+            } catch (Exception ignored) {
+            }
+        }
+        return defaultValue;
+    }
+
+    private static long firstLong(JsonObject json, long defaultValue, String... keys) {
+        if (json == null || keys == null) {
+            return defaultValue;
+        }
+        for (String key : keys) {
+            if (!json.has(key) || json.get(key).isJsonNull()) {
+                continue;
+            }
+            try {
+                return json.get(key).getAsLong();
+            } catch (Exception ignored) {
+            }
+        }
+        return defaultValue;
+    }
+
+    private static String normalizeHudEntryKey(String playerName) {
+        return playerName == null ? "" : playerName.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static void appendCurrentPlayerProfile(JsonObject body, String fallbackPlayerName) {
+        if (body == null) {
+            return;
+        }
+
+        JsonObject profile = collectCurrentPlayerProfile(fallbackPlayerName);
+        if (profile == null) {
+            if ((fallbackPlayerName != null && !fallbackPlayerName.isBlank()) && !body.has("playerName")) {
+                body.addProperty("playerName", fallbackPlayerName);
+            }
+            return;
+        }
+
+        if (profile.has("name") && !body.has("playerName")) {
+            body.addProperty("playerName", profile.get("name").getAsString());
+        }
+        if (profile.has("uuid")) {
+            body.addProperty("playerUuid", profile.get("uuid").getAsString());
+        }
+        body.add("playerProfile", profile);
+    }
+
+    private static JsonObject collectCurrentPlayerProfile(String fallbackPlayerName) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null || client.player == null) {
+            return buildFallbackProfile(fallbackPlayerName);
+        }
+
+        JsonObject profile = new JsonObject();
+        String playerName = firstNonBlank(client.player.getName().getString(), fallbackPlayerName);
+        if (playerName != null) {
+            profile.addProperty("name", playerName);
+        }
+
+        profile.addProperty("uuid", client.player.getUuidAsString());
+
+        var gameProfile = client.player.getGameProfile();
+        if (gameProfile != null) {
+            String texturesValue = extractTexturesPropertyValue(gameProfile);
+            if (texturesValue != null) {
+                profile.addProperty("texturesValue", texturesValue);
+            }
+
+            String texturesSignature = extractTexturesPropertySignature(gameProfile);
+            if (texturesSignature != null) {
+                profile.addProperty("texturesSignature", texturesSignature);
+            }
+        }
+
+        if (client.player instanceof AbstractClientPlayerEntity abstractPlayer) {
+            Object skinTextures = firstNonNull(
+                    invokeNoArg(abstractPlayer, "getSkinTextures"),
+                    invokeNoArg(abstractPlayer, "getSkin")
+            );
+            String skinTexture = identifierToString(invokeNoArg(skinTextures, "texture"));
+            if (skinTexture != null) {
+                profile.addProperty("skinTexture", skinTexture);
+            }
+
+            String capeTexture = identifierToString(invokeNoArg(skinTextures, "capeTexture"));
+            if (capeTexture != null) {
+                profile.addProperty("capeTexture", capeTexture);
+            }
+
+            String model = stringifySkinModel(invokeNoArg(skinTextures, "model"));
+            if (model != null) {
+                profile.addProperty("model", model);
+            }
+        }
+
+        return profile.size() == 0 ? buildFallbackProfile(fallbackPlayerName) : profile;
+    }
+
+    private static JsonObject buildFallbackProfile(String fallbackPlayerName) {
+        if (fallbackPlayerName == null || fallbackPlayerName.isBlank()) {
+            return null;
+        }
+
+        JsonObject profile = new JsonObject();
+        profile.addProperty("name", fallbackPlayerName);
+        return profile;
+    }
+
+    private static String extractTexturesPropertyValue(Object gameProfile) {
+        Object property = firstTexturesProperty(gameProfile);
+        return property == null ? null : firstNonBlank(stringifyValue(invokeNoArg(property, "value")), stringifyValue(invokeNoArg(property, "getValue")));
+    }
+
+    private static String extractTexturesPropertySignature(Object gameProfile) {
+        Object property = firstTexturesProperty(gameProfile);
+        return property == null ? null : firstNonBlank(stringifyValue(invokeNoArg(property, "signature")), stringifyValue(invokeNoArg(property, "getSignature")));
+    }
+
+    private static Object firstTexturesProperty(Object gameProfile) {
+        if (gameProfile == null) {
+            return null;
+        }
+
+        Object properties = invokeNoArg(gameProfile, "getProperties");
+        if (properties == null) {
+            return null;
+        }
+
+        Object textures = invokeOneArg(properties, "get", "textures");
+        if (textures instanceof Iterable<?> iterable) {
+            for (Object entry : iterable) {
+                if (entry != null) {
+                    return entry;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Object invokeNoArg(Object target, String methodName) {
+        if (target == null || methodName == null || methodName.isBlank()) {
+            return null;
+        }
+
+        try {
+            Method method = target.getClass().getMethod(methodName);
+            return method.invoke(target);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static Object invokeOneArg(Object target, String methodName, Object argument) {
+        if (target == null || methodName == null || methodName.isBlank()) {
+            return null;
+        }
+
+        for (Method method : target.getClass().getMethods()) {
+            if (!method.getName().equals(methodName) || method.getParameterCount() != 1) {
+                continue;
+            }
+
+            try {
+                return method.invoke(target, argument);
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static String identifierToString(Object identifier) {
+        return stringifyValue(identifier);
+    }
+
+    private static String stringifySkinModel(Object model) {
+        if (model == null) {
+            return null;
+        }
+
+        String asString = stringifyValue(invokeNoArg(model, "asString"));
+        if (asString != null) {
+            return asString;
+        }
+
+        String getName = stringifyValue(invokeNoArg(model, "getName"));
+        if (getName != null) {
+            return getName;
+        }
+
+        return stringifyValue(model);
+    }
+
+    private static String stringifyValue(Object value) {
+        if (value == null) {
+            return null;
+        }
+
+        String asString = String.valueOf(value).trim();
+        return asString.isBlank() ? null : asString;
+    }
+
+    private static String firstNonBlank(String primary, String secondary) {
+        if (primary != null && !primary.isBlank()) {
+            return primary;
+        }
+        if (secondary != null && !secondary.isBlank()) {
+            return secondary;
+        }
+        return null;
+    }
+
+    private static Object firstNonNull(Object primary, Object secondary) {
+        return primary != null ? primary : secondary;
+    }
+
+    private static float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static String currentPlayerSkinTexture() {
+        JsonObject profile = collectCurrentPlayerProfile(null);
+        if (profile == null || !profile.has("skinTexture")) {
+            return null;
+        }
+        return profile.get("skinTexture").getAsString();
+    }
+
     private static Long parseAmount(String amountText) {
         if (amountText == null) {
             return null;
@@ -620,12 +1234,12 @@ public class BotBridge {
         }
     }
 
-    private static String normalizeJoinCode(String code) {
+    private static String normalizeAdminCode(String code) {
         return code == null ? null : code.trim().toUpperCase(Locale.ROOT);
     }
 
     private static void log(String msg) {
-        System.out.println("[ChestBot] " + msg);
+        ChestBotMod.LOGGER.info("[ChestBot] {}", msg);
     }
 
     // ── 내부 데이터 클래스 ────────────────────────────────────────
@@ -660,5 +1274,44 @@ public class BotBridge {
     }
 
     private record PendingBankTransaction(String playerName, String transactionType, String amountText, String sourceMessage, long createdAtMillis) {
+    }
+
+    private record LocalHudHolding(String itemName, int netCount, String itemVisualData, String chestName, long updatedAtMillis) {
+    }
+
+    public record HudRotationItem(
+            String itemName,
+            int itemCount,
+            String itemVisualData
+    ) {
+    }
+
+    public record RecentChestHudEntry(
+            String playerName,
+            String chestName,
+            String itemName,
+            int itemCount,
+            int totalKinds,
+            int totalItems,
+            String itemVisualData,
+            List<HudRotationItem> rotationItems,
+            String skinTexture,
+            long createdAtMillis
+    ) {
+    }
+
+    public record MemberHudEntry(
+            String playerName,
+            String itemName,
+            int itemCount,
+            int totalKinds,
+            int totalItems,
+            String itemVisualData,
+            List<HudRotationItem> rotationItems,
+            String chestName,
+            String skinTexture,
+            String playerUuid,
+            long updatedAtMillis
+    ) {
     }
 }
