@@ -1,54 +1,31 @@
 package com.example.chestbot;
 
+import com.example.chestbot.compat.ItemStackVisualCompat;
+import com.example.chestbot.hud.ChestHudItemVisuals;
+import net.minecraft.block.Block;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
-import net.minecraft.text.Text;
-import net.minecraft.block.Block;
-import net.minecraft.block.ChestBlock;
 import net.minecraft.item.ItemStack;
 import net.minecraft.screen.GenericContainerScreenHandler;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.ScreenHandlerListener;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
-/**
- * 플레이어가 등록된 상자를 열고 닫을 때 인벤토리 변화를 감지한다.
- *
- * <p>등록된 chest 목록은 {@link BotBridge#findByPos(BlockPos)} 를 통해 조회한다.</p>
- *
- * <h3>라이선스 재검증 흐름</h3>
- * <ol>
- *   <li>등록된 상자 열림 감지 → 즉시 {@link BotBridge#reloadAsync()} 비동기 호출</li>
- *   <li>{@code SNAPSHOT_DELAY_TICKS} 동안 서버 응답 대기
- *       (이미 존재하는 딜레이이므로 게임 성능 영향 없음)</li>
- *   <li>응답 도달 시:
- *       <ul>
- *         <li>성공 → 스냅샷 확정, 정상 기록</li>
- *         <li>실패 (라이선스 비활성화 등) → 스냅샷 취소, 플레이어에게 메시지 표시</li>
- *       </ul>
- *   </li>
- *   <li>응답 전에 상자가 닫히면 → 대기 상태 전체 초기화</li>
- * </ol>
- */
 public class ChestInteractor {
 
-    private static Screen prevScreen    = null;
-    private static String openChestName = null;
-    private static Map<String, Integer> beforeSnapshot = null;
-
-    // 상자 열린 직후 서버에서 인벤토리 데이터를 받기까지 대기하는 틱 수
-    private static final int SNAPSHOT_DELAY_TICKS = 10;
-    private static int ticksSinceOpen = 0;
-    private static String pendingChestName = null;
-    private static GenericContainerScreenHandler pendingHandler = null;
-
-    // 등록 상자 열림 시 서버에 라이선스 재검증 요청
+    private static Screen prevScreen = null;
+    private static ChestSession session = null;
     private static CompletableFuture<Boolean> pendingValidation = null;
 
     public static void onBlockInteracted(MinecraftClient client, BlockPos pos) {
@@ -79,7 +56,7 @@ public class ChestInteractor {
         }
         bridge.finalizeAdminModeAsync().whenComplete((saved, err) -> {
             if (client.player == null) return;
-            net.minecraft.client.MinecraftClient.getInstance().execute(() -> {
+            MinecraftClient.getInstance().execute(() -> {
                 if (err != null || !Boolean.TRUE.equals(saved)) {
                     client.player.sendMessage(Text.literal(
                             "§c[창고지기] ❌ '" + name + "' 저장 실패 @ " + pos.toShortString() + doubleChestSuffix), false);
@@ -98,7 +75,6 @@ public class ChestInteractor {
     public static void tick(MinecraftClient client) {
         Screen current = client.currentScreen;
 
-        // ① 상자가 방금 열렸는지 감지
         if ((prevScreen == null || !(prevScreen instanceof HandledScreen<?>))
                 && current instanceof HandledScreen<?> hs
                 && hs.getScreenHandler() instanceof GenericContainerScreenHandler container) {
@@ -107,99 +83,88 @@ public class ChestInteractor {
             if (pos != null) {
                 String name = ChestBotMod.getBridge().findByPos(pos);
                 if (name != null) {
-                    pendingChestName = name;
-                    pendingHandler   = container;
-                    ticksSinceOpen   = 0;
-                    // 등록 상자가 열리는 순간 라이선스 재검증 비동기 시작
-                    // reloadAsync()는 별도 스레드에서 HTTP 호출 → 게임 스레드 영향 없음
-                    pendingValidation = ChestBotMod.getBridge().reloadAsync();
-                    System.out.printf("[ChestBot] '%s' 열림 — 라이선스 재검증 중, %d틱 후 스냅샷 예정 @ %s%n",
-                            name, SNAPSHOT_DELAY_TICKS, pos.toShortString());
+                    startSession(client, name, pos, container);
                 } else {
-                    System.out.printf("[ChestBot] chest 열림 감지됨, 하지만 등록되지 않은 위치입니다: %s%n",
+                    ChestBotMod.LOGGER.info("[ChestBot] chest 열림 감지됨, 하지만 등록되지 않은 위치입니다: {}",
                             pos.toShortString());
                 }
             }
         }
 
-        // ① - a) 대기 중인데 상자가 닫힌 경우: 전체 초기화 (응답 전 닫기 대응)
-        if (pendingChestName != null && !(current instanceof HandledScreen<?>)) {
-            System.out.printf("[ChestBot] '%s' — 검증 대기 중 상자가 닫혔습니다. 초기화.%n", pendingChestName);
-            cancelPending();
-        }
-
-        // ① - b) 지연 스냅샷: 대기 틱이 지나면 검증 결과 확인 후 beforeSnapshot 확정
-        if (pendingChestName != null && current instanceof HandledScreen<?>) {
-            ticksSinceOpen++;
-            if (ticksSinceOpen >= SNAPSHOT_DELAY_TICKS) {
-                if (pendingValidation != null && !pendingValidation.isDone()) {
-                    // 검증 응답 아직 미도착 — 이번 틱은 대기 (prevScreen 업데이트는 정상 진행)
-                } else {
-                    // 검증 완료 (또는 검증 없음) — 결과 처리
+        if (session != null) {
+            if (!(current instanceof HandledScreen<?>)) {
+                finishSession(client, true);
+            } else if (!(session.handler() == ((HandledScreen<?>) current).getScreenHandler())) {
+                finishSession(client, true);
+            } else {
+                if (pendingValidation != null && pendingValidation.isDone()) {
                     boolean valid = true;
-                    if (pendingValidation != null) {
-                        try {
-                            valid = Boolean.TRUE.equals(pendingValidation.get());
-                        } catch (Exception ignored) {
-                            valid = false;
-                        }
-                        pendingValidation = null;
+                    try {
+                        valid = Boolean.TRUE.equals(pendingValidation.get());
+                    } catch (Exception ignored) {
+                        valid = false;
                     }
+                    pendingValidation = null;
 
                     if (!valid) {
                         if (client.player != null) {
                             boolean stillConnected = ChestBotMod.getBridge().isConnected();
                             String msg = stillConnected
-                                    ? "§c[창고지기] 라이선스 검증 실패 — 창고 기록이 중단됩니다."
-                                    : "§c[창고지기] 라이선스가 비활성화되었습니다. 연결 정보가 초기화되었으니 새 라이선스를 입력하세요.";
+                                    ? "§c[창고지기] 연결 재동기화 실패 — 창고 기록이 중단됩니다."
+                                    : "§c[창고지기] 서버 연결이 해제되었습니다. /창고봇 연결 로 다시 연결하세요.";
                             client.player.sendMessage(Text.literal(msg), false);
                         }
-                        System.out.printf("[ChestBot] '%s' — 라이선스 검증 실패, 스냅샷 취소.%n", pendingChestName);
-                        cancelPending();
-                    } else {
-                        openChestName  = pendingChestName;
-                        beforeSnapshot = takeSnapshot(pendingHandler);
-                        System.out.printf("[ChestBot] '%s' beforeSnapshot 확정 — %d종%n",
-                                openChestName, beforeSnapshot.size());
-                        pendingChestName = null;
-                        pendingHandler   = null;
-                        ticksSinceOpen   = 0;
+                        ChestBotMod.LOGGER.info("[ChestBot] '{}' — 연결 재동기화 실패, 세션 취소.", session.chestName());
+                        finishSession(client, false);
                     }
                 }
             }
         }
 
-        // ② 등록 상자가 방금 닫혔는지 감지
-        if (openChestName != null
-                && !(current instanceof HandledScreen<?>)
-                && prevScreen instanceof HandledScreen<?> ph
-                && ph.getScreenHandler() instanceof GenericContainerScreenHandler prevContainer) {
-
-            String playerName = (client.player != null)
-                    ? client.player.getName().getString() : "Unknown";
-
-            Map<String, Integer> afterSnapshot = takeSnapshot(prevContainer);
-            sendDiff(playerName, openChestName, beforeSnapshot, afterSnapshot);
-
-            openChestName    = null;
-            beforeSnapshot   = null;
-            pendingChestName = null;
-            pendingHandler   = null;
-            ticksSinceOpen   = 0;
-            pendingValidation = null;
-        }
-
         prevScreen = current;
     }
 
-    private static void cancelPending() {
+    private static void startSession(MinecraftClient client, String chestName, BlockPos pos, GenericContainerScreenHandler handler) {
+        finishSession(client, false);
+
+        ChestSession nextSession = new ChestSession(chestName, handler, handler.syncId, handler.getRows() * 9);
+        nextSession.seedFromHandler();
+        nextSession.attach();
+        session = nextSession;
+        pendingValidation = ChestBotMod.getBridge().reloadAsync();
+
+        ChestBotMod.LOGGER.info("[ChestBot] '{}' 열림 — baseline 즉시 시드 완료 ({}종) @ {}",
+                chestName, nextSession.baselineSnapshot().size(), pos.toShortString());
+    }
+
+    private static void finishSession(MinecraftClient client, boolean sendDiff) {
+        ChestSession currentSession = session;
+        if (currentSession == null) {
+            return;
+        }
+
+        currentSession.detach();
+
+        if (sendDiff && currentSession.baselineReady()) {
+            String playerName = (client.player != null)
+                    ? client.player.getName().getString() : "Unknown";
+            Map<String, Integer> afterSnapshot = takeSnapshot(currentSession.handler());
+            Map<String, String> afterVisuals = takeVisualSnapshot(client, currentSession.handler());
+            sendDiff(playerName,
+                    currentSession.chestName(),
+                    currentSession.baselineSnapshot(),
+                    currentSession.baselineVisuals(),
+                    afterSnapshot,
+                    afterVisuals);
+        } else if (sendDiff) {
+            ChestBotMod.LOGGER.info("[ChestBot] '{}' 닫힘 — baseline 미완성으로 diff 생략", currentSession.chestName());
+        }
+
+        session = null;
         if (pendingValidation != null) {
             pendingValidation.cancel(false);
             pendingValidation = null;
         }
-        pendingChestName = null;
-        pendingHandler   = null;
-        ticksSinceOpen   = 0;
     }
 
     private static Map<String, Integer> takeSnapshot(GenericContainerScreenHandler handler) {
@@ -208,14 +173,29 @@ public class ChestInteractor {
         for (int i = 0; i < rows * 9; i++) {
             ItemStack stack = handler.getSlot(i).getStack();
             if (stack.isEmpty()) continue;
-            String displayName = stack.getName().getString();
+            String displayName = ChestHudItemVisuals.formatItemName(stack.getName().getString());
             snap.merge(displayName, stack.getCount(), Integer::sum);
         }
         return snap;
     }
 
+    private static Map<String, String> takeVisualSnapshot(MinecraftClient client, GenericContainerScreenHandler handler) {
+        Map<String, String> snap = new LinkedHashMap<>();
+        int rows = handler.getRows();
+        for (int i = 0; i < rows * 9; i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.isEmpty()) continue;
+            String displayName = ChestHudItemVisuals.formatItemName(stack.getName().getString());
+            snap.putIfAbsent(displayName, ItemStackVisualCompat.serialize(client, stack));
+        }
+        return snap;
+    }
+
     private static void sendDiff(String player, String chestName,
-                                 Map<String, Integer> before, Map<String, Integer> after) {
+                                 Map<String, Integer> before,
+                                 Map<String, String> beforeVisuals,
+                                 Map<String, Integer> after,
+                                 Map<String, String> afterVisuals) {
         Map<String, Integer> taken = new LinkedHashMap<>();
         Map<String, Integer> added = new LinkedHashMap<>();
 
@@ -229,10 +209,26 @@ public class ChestInteractor {
             else if (diff < 0) added.put(item, -diff);
         }
 
-        System.out.printf("[ChestBot] '%s' 닫힘 — %s: 꺼냄 %d종, 넣음 %d종%n",
+        ChestBotMod.LOGGER.info("[ChestBot] '{}' 닫힘 — {}: 꺼냄 {}종, 넣음 {}종",
                 chestName, player, taken.size(), added.size());
 
-        ChestBotMod.getBridge().sendChestLog(player, chestName, taken, added);
+        String takenVisual = firstVisualFor(taken, beforeVisuals);
+        String addedVisual = firstVisualFor(added, afterVisuals);
+        ChestBotMod.getBridge().rememberRecentChestHudEntry(player, chestName, taken, added, takenVisual, addedVisual);
+        ChestBotMod.getBridge().sendChestLog(player, chestName, taken, added, takenVisual, addedVisual);
+    }
+
+    private static String firstVisualFor(Map<String, Integer> diff, Map<String, String> visuals) {
+        if (diff == null || diff.isEmpty() || visuals == null || visuals.isEmpty()) {
+            return null;
+        }
+        for (String key : diff.keySet()) {
+            String visual = visuals.get(key);
+            if (visual != null && !visual.isBlank()) {
+                return visual;
+            }
+        }
+        return null;
     }
 
     private static BlockPos findAdjacentChest(MinecraftClient client, BlockPos pos) {
@@ -245,5 +241,130 @@ public class ChestInteractor {
             }
         }
         return null;
+    }
+
+    private static final class ChestSession implements ScreenHandlerListener {
+        private final String chestName;
+        private final GenericContainerScreenHandler handler;
+        private final int syncId;
+        private final int containerSlotCount;
+        private final ItemStack[] baselineSlots;
+        private final ItemStack[] currentSlots;
+        private final boolean[] seenSlots;
+        private boolean attached;
+        private boolean baselineReady;
+
+        private ChestSession(String chestName, GenericContainerScreenHandler handler, int syncId, int containerSlotCount) {
+            this.chestName = chestName;
+            this.handler = handler;
+            this.syncId = syncId;
+            this.containerSlotCount = containerSlotCount;
+            this.baselineSlots = new ItemStack[containerSlotCount];
+            this.currentSlots = new ItemStack[containerSlotCount];
+            this.seenSlots = new boolean[containerSlotCount];
+            Arrays.fill(this.baselineSlots, ItemStack.EMPTY);
+            Arrays.fill(this.currentSlots, ItemStack.EMPTY);
+        }
+
+        private void attach() {
+            if (!attached) {
+                handler.addListener(this);
+                attached = true;
+            }
+        }
+
+        private void seedFromHandler() {
+            for (int slotId = 0; slotId < containerSlotCount; slotId++) {
+                ItemStack stack = handler.getSlot(slotId).getStack();
+                ItemStack copy = stack == null ? ItemStack.EMPTY : stack.copy();
+                baselineSlots[slotId] = copy.copy();
+                currentSlots[slotId] = copy;
+                seenSlots[slotId] = true;
+            }
+            baselineReady = true;
+        }
+
+        private void detach() {
+            if (attached) {
+                handler.removeListener(this);
+                attached = false;
+            }
+        }
+
+        private String chestName() {
+            return chestName;
+        }
+
+        private GenericContainerScreenHandler handler() {
+            return handler;
+        }
+
+        private boolean baselineReady() {
+            return baselineReady;
+        }
+
+        private Map<String, Integer> baselineSnapshot() {
+            return snapshotFromStacks(baselineSlots);
+        }
+
+        private Map<String, String> baselineVisuals() {
+            return visualSnapshotFromStacks(baselineSlots);
+        }
+
+        @Override
+        public void onSlotUpdate(ScreenHandler screenHandler, int slotId, ItemStack stack) {
+            if (screenHandler != handler || handler.syncId != syncId) {
+                return;
+            }
+            if (slotId < 0 || slotId >= containerSlotCount) {
+                return;
+            }
+
+            ItemStack copy = stack == null ? ItemStack.EMPTY : stack.copy();
+            currentSlots[slotId] = copy;
+            if (!seenSlots[slotId]) {
+                baselineSlots[slotId] = copy.copy();
+                seenSlots[slotId] = true;
+                if (!baselineReady && allSlotsSeen()) {
+                    baselineReady = true;
+                    ChestBotMod.LOGGER.info("[ChestBot] '{}' baseline 확정 — {}슬롯 초기 동기화 완료",
+                            chestName, containerSlotCount);
+                }
+            }
+        }
+
+        @Override
+        public void onPropertyUpdate(ScreenHandler handler, int property, int value) {
+        }
+
+        private boolean allSlotsSeen() {
+            for (boolean seen : seenSlots) {
+                if (!seen) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private Map<String, Integer> snapshotFromStacks(ItemStack[] stacks) {
+            Map<String, Integer> snap = new LinkedHashMap<>();
+            for (ItemStack stack : stacks) {
+                if (stack == null || stack.isEmpty()) continue;
+                String displayName = ChestHudItemVisuals.formatItemName(stack.getName().getString());
+                snap.merge(displayName, stack.getCount(), Integer::sum);
+            }
+            return snap;
+        }
+
+        private Map<String, String> visualSnapshotFromStacks(ItemStack[] stacks) {
+            Map<String, String> snap = new LinkedHashMap<>();
+            MinecraftClient client = MinecraftClient.getInstance();
+            for (ItemStack stack : stacks) {
+                if (stack == null || stack.isEmpty()) continue;
+                String displayName = ChestHudItemVisuals.formatItemName(stack.getName().getString());
+                snap.putIfAbsent(displayName, ItemStackVisualCompat.serialize(client, stack));
+            }
+            return snap;
+        }
     }
 }
