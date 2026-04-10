@@ -24,9 +24,13 @@ import java.util.concurrent.CompletableFuture;
 
 public class ChestInteractor {
 
+    private static final long ACTION_SETTLE_MILLIS = 120L;
+    private static final long ACTION_TIMEOUT_MILLIS = 500L;
+
     private static Screen prevScreen = null;
     private static ChestSession session = null;
     private static CompletableFuture<Boolean> pendingValidation = null;
+    private static PendingLocalAction pendingLocalAction = null;
 
     public static void onBlockInteracted(MinecraftClient client, BlockPos pos) {
         if (client == null || pos == null || client.world == null) {
@@ -92,6 +96,7 @@ public class ChestInteractor {
         }
 
         if (session != null) {
+            maybeFlushPendingLocalAction(client);
             if (!(current instanceof HandledScreen<?>)) {
                 finishSession(client, true);
             } else if (!(session.handler() == ((HandledScreen<?>) current).getScreenHandler())) {
@@ -146,16 +151,7 @@ public class ChestInteractor {
         currentSession.detach();
 
         if (sendDiff && currentSession.baselineReady()) {
-            String playerName = (client.player != null)
-                    ? client.player.getName().getString() : "Unknown";
-            Map<String, Integer> afterSnapshot = takeSnapshot(currentSession.handler());
-            Map<String, String> afterVisuals = takeVisualSnapshot(client, currentSession.handler());
-            sendDiff(playerName,
-                    currentSession.chestName(),
-                    currentSession.baselineSnapshot(),
-                    currentSession.baselineVisuals(),
-                    afterSnapshot,
-                    afterVisuals);
+            ChestBotMod.LOGGER.info("[ChestBot] '{}' 닫힘 — close-time diff 귀속은 비활성화됨", currentSession.chestName());
         } else if (sendDiff) {
             ChestBotMod.LOGGER.info("[ChestBot] '{}' 닫힘 — baseline 미완성으로 diff 생략", currentSession.chestName());
         }
@@ -165,6 +161,51 @@ public class ChestInteractor {
             pendingValidation.cancel(false);
             pendingValidation = null;
         }
+        pendingLocalAction = null;
+    }
+
+    public static void onLocalSlotActionStart(int syncId) {
+        maybeFlushPendingLocalAction(MinecraftClient.getInstance());
+        ChestSession currentSession = session;
+        if (currentSession == null || !currentSession.baselineReady() || currentSession.syncId() != syncId) {
+            pendingLocalAction = null;
+            return;
+        }
+
+        pendingLocalAction = new PendingLocalAction(syncId, currentSession.chestName(), takeSnapshot(currentSession.handler()), takeVisualSnapshot(MinecraftClient.getInstance(), currentSession.handler()));
+    }
+
+    public static void onLocalSlotActionEnd(int syncId) {
+        PendingLocalAction action = pendingLocalAction;
+        if (action == null || action.syncId != syncId) {
+            pendingLocalAction = null;
+            return;
+        }
+        action.markSent();
+    }
+
+    private static void maybeFlushPendingLocalAction(MinecraftClient client) {
+        PendingLocalAction action = pendingLocalAction;
+        ChestSession currentSession = session;
+        if (action == null || client == null || currentSession == null) {
+            return;
+        }
+        if (!action.sent || currentSession.syncId() != action.syncId) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        boolean timedOut = now - action.startedAtMillis >= ACTION_TIMEOUT_MILLIS;
+        boolean settled = action.lastServerUpdateAtMillis > 0L && now - action.lastServerUpdateAtMillis >= ACTION_SETTLE_MILLIS;
+        if (!timedOut && !settled) {
+            return;
+        }
+
+        String playerName = client.player != null ? client.player.getName().getString() : "Unknown";
+        Map<String, Integer> afterSnapshot = takeSnapshot(currentSession.handler());
+        Map<String, String> afterVisuals = takeVisualSnapshot(client, currentSession.handler());
+        sendDiff(playerName, action.chestName, action.beforeSnapshot, action.beforeVisuals, afterSnapshot, afterVisuals);
+        pendingLocalAction = null;
     }
 
     private static Map<String, Integer> takeSnapshot(GenericContainerScreenHandler handler) {
@@ -209,13 +250,33 @@ public class ChestInteractor {
             else if (diff < 0) added.put(item, -diff);
         }
 
+        if (taken.isEmpty() && added.isEmpty()) {
+            return;
+        }
+
         ChestBotMod.LOGGER.info("[ChestBot] '{}' 닫힘 — {}: 꺼냄 {}종, 넣음 {}종",
                 chestName, player, taken.size(), added.size());
 
+        Map<String, String> takenVisuals = filterVisuals(taken, beforeVisuals);
+        Map<String, String> addedVisuals = filterVisuals(added, afterVisuals);
         String takenVisual = firstVisualFor(taken, beforeVisuals);
         String addedVisual = firstVisualFor(added, afterVisuals);
-        ChestBotMod.getBridge().rememberRecentChestHudEntry(player, chestName, taken, added, takenVisual, addedVisual);
+        ChestBotMod.getBridge().rememberRecentChestHudEntry(player, chestName, taken, added, takenVisuals, addedVisuals);
         ChestBotMod.getBridge().sendChestLog(player, chestName, taken, added, takenVisual, addedVisual);
+    }
+
+    private static Map<String, String> filterVisuals(Map<String, Integer> diff, Map<String, String> visuals) {
+        Map<String, String> filtered = new LinkedHashMap<>();
+        if (diff == null || diff.isEmpty() || visuals == null || visuals.isEmpty()) {
+            return filtered;
+        }
+        for (String key : diff.keySet()) {
+            String visual = visuals.get(key);
+            if (visual != null && !visual.isBlank()) {
+                filtered.put(key, visual);
+            }
+        }
+        return filtered;
     }
 
     private static String firstVisualFor(Map<String, Integer> diff, Map<String, String> visuals) {
@@ -295,6 +356,10 @@ public class ChestInteractor {
             return chestName;
         }
 
+        private int syncId() {
+            return syncId;
+        }
+
         private GenericContainerScreenHandler handler() {
             return handler;
         }
@@ -322,6 +387,9 @@ public class ChestInteractor {
 
             ItemStack copy = stack == null ? ItemStack.EMPTY : stack.copy();
             currentSlots[slotId] = copy;
+            if (pendingLocalAction != null && pendingLocalAction.syncId == syncId && pendingLocalAction.sent) {
+                pendingLocalAction.markServerUpdate();
+            }
             if (!seenSlots[slotId]) {
                 baselineSlots[slotId] = copy.copy();
                 seenSlots[slotId] = true;
@@ -365,6 +433,34 @@ public class ChestInteractor {
                 snap.putIfAbsent(displayName, ItemStackVisualCompat.serialize(client, stack));
             }
             return snap;
+        }
+    }
+
+    private static final class PendingLocalAction {
+        private final int syncId;
+        private final String chestName;
+        private final Map<String, Integer> beforeSnapshot;
+        private final Map<String, String> beforeVisuals;
+        private final long startedAtMillis;
+        private long lastServerUpdateAtMillis;
+        private boolean sent;
+
+        private PendingLocalAction(int syncId, String chestName, Map<String, Integer> beforeSnapshot, Map<String, String> beforeVisuals) {
+            this.syncId = syncId;
+            this.chestName = chestName;
+            this.beforeSnapshot = beforeSnapshot;
+            this.beforeVisuals = beforeVisuals;
+            this.startedAtMillis = System.currentTimeMillis();
+            this.lastServerUpdateAtMillis = 0L;
+            this.sent = false;
+        }
+
+        private void markSent() {
+            this.sent = true;
+        }
+
+        private void markServerUpdate() {
+            this.lastServerUpdateAtMillis = System.currentTimeMillis();
         }
     }
 }
