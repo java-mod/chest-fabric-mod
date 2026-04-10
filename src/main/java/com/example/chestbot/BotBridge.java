@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class BotBridge {
 
     private static final String DEFAULT_URL = "https://chestbot.kro.kr";
+    private static final int DEFAULT_SERVER_PORT = 5000;
     private static final long HUD_REFRESH_INTERVAL_MILLIS = 10_000L;
 
     // ── 설정 (파일에서 로드) ────────────────────────────────────
@@ -40,10 +41,17 @@ public class BotBridge {
     private long configVersion;
     private final Map<String, BlockPos> chestMap = new LinkedHashMap<>();
     private String lastConnectError;
+    private String selectedCropKey;
     private boolean hudEnabled = true;
     private int hudX = 8;
     private int hudY = 8;
     private float hudScale = 1.0F;
+    private boolean farmingHudEnabled = true;
+    private int farmingHudX = 8;
+    private int farmingHudY = 80;
+    private float farmingHudScale = 1.0F;
+    private int chestHudPage = 0;
+    private int farmingHudPage = 0;
     private boolean hudEditMode;
     private RecentChestHudEntry recentChestHudEntry;
     private final List<MemberHudEntry> memberHudEntries = new ArrayList<>();
@@ -439,6 +447,30 @@ public class BotBridge {
         return hudScale;
     }
 
+    public boolean isFarmingHudEnabled() {
+        return farmingHudEnabled;
+    }
+
+    public int getFarmingHudX() {
+        return farmingHudX;
+    }
+
+    public int getFarmingHudY() {
+        return farmingHudY;
+    }
+
+    public float getFarmingHudScale() {
+        return farmingHudScale;
+    }
+
+    public int getChestHudPage() {
+        return chestHudPage;
+    }
+
+    public int getFarmingHudPage() {
+        return farmingHudPage;
+    }
+
     public boolean isHudEditMode() {
         return hudEditMode;
     }
@@ -453,10 +485,61 @@ public class BotBridge {
         saveConfig();
     }
 
+    public void setFarmingHudEnabled(boolean farmingHudEnabled) {
+        this.farmingHudEnabled = farmingHudEnabled;
+        saveConfig();
+    }
+
+    public void setFarmingHudPosition(int x, int y) {
+        applyFarmingHudLayout(x, y, farmingHudScale);
+        saveConfig();
+    }
+
+    public void setFarmingHudScale(float scale) {
+        applyFarmingHudLayout(farmingHudX, farmingHudY, scale);
+        saveConfig();
+    }
+
     public void applyHudLayout(int x, int y, float scale) {
         this.hudX = Math.max(0, x);
         this.hudY = Math.max(0, y);
         this.hudScale = clamp(scale, 0.5F, 3.0F);
+    }
+
+    public void applyFarmingHudLayout(int x, int y, float scale) {
+        this.farmingHudX = Math.max(0, x);
+        this.farmingHudY = Math.max(0, y);
+        this.farmingHudScale = clamp(scale, 0.5F, 3.0F);
+    }
+
+    public int nextChestHudPage(int totalEntries) {
+        chestHudPage = nextPage(chestHudPage, totalEntries);
+        return chestHudPage;
+    }
+
+    public int previousChestHudPage(int totalEntries) {
+        chestHudPage = previousPage(chestHudPage, totalEntries);
+        return chestHudPage;
+    }
+
+    public int nextFarmingHudPage(int totalEntries) {
+        farmingHudPage = nextPage(farmingHudPage, totalEntries);
+        return farmingHudPage;
+    }
+
+    public int previousFarmingHudPage(int totalEntries) {
+        farmingHudPage = previousPage(farmingHudPage, totalEntries);
+        return farmingHudPage;
+    }
+
+    public void resetChestHudPage() {
+        chestHudPage = 0;
+        saveConfig();
+    }
+
+    public void resetFarmingHudPage() {
+        farmingHudPage = 0;
+        saveConfig();
     }
 
     public void persistHudLayout() {
@@ -478,27 +561,30 @@ public class BotBridge {
             if (entry == null || entry.playerName() == null || entry.playerName().isBlank()) {
                 continue;
             }
-            merged.put(normalizeHudEntryKey(entry.playerName()), entry);
+            merged.put(normalizeHudEntryKey(entry.playerUuid(), entry.playerName()), entry);
         }
 
         getRecentChestHudEntry()
                 .map(this::toMemberHudEntry)
-                .ifPresent(entry -> merged.put(normalizeHudEntryKey(entry.playerName()), entry));
+                .ifPresent(entry -> {
+                    String key = normalizeHudEntryKey(entry.playerUuid(), entry.playerName());
+                    merged.put(key, mergeHudEntries(merged.get(key), entry));
+                });
 
         return List.copyOf(merged.values());
     }
 
     public void rememberRecentChestHudEntry(String playerName, String chestName, Map<String, Integer> taken, Map<String, Integer> added,
-                                            String takenVisualData, String addedVisualData) {
+                                            Map<String, String> takenVisuals, Map<String, String> addedVisuals) {
         if (playerName == null || playerName.isBlank()) {
             return;
         }
-        applyLocalHudTaken(chestName, taken, takenVisualData);
+        applyLocalHudTaken(chestName, taken, takenVisuals);
         applyLocalHudAdded(added);
         rebuildRecentHudEntry(playerName);
     }
 
-    private void applyLocalHudTaken(String chestName, Map<String, Integer> diff, String visualData) {
+    private void applyLocalHudTaken(String chestName, Map<String, Integer> diff, Map<String, String> visuals) {
         if (diff == null || diff.isEmpty()) {
             return;
         }
@@ -510,6 +596,7 @@ public class BotBridge {
                 continue;
             }
 
+            String visualData = visuals == null ? null : visuals.get(itemName);
             LocalHudHolding holding = localHudHoldings.getOrDefault(itemName, new LocalHudHolding(itemName, 0, visualData, chestName, System.currentTimeMillis()));
             int nextCount = holding.netCount() + count;
 
@@ -603,8 +690,31 @@ public class BotBridge {
                 entry.rotationItems(),
                 entry.chestName(),
                 entry.skinTexture(),
+                currentPlayerUuid(),
+                entry.createdAtMillis(),
                 null,
-                entry.createdAtMillis()
+                0L
+        );
+    }
+
+    private MemberHudEntry mergeHudEntries(MemberHudEntry remote, MemberHudEntry local) {
+        if (remote == null) {
+            return local;
+        }
+        return new MemberHudEntry(
+                local.playerName(),
+                local.itemName(),
+                local.itemCount(),
+                local.totalKinds(),
+                local.totalItems(),
+                local.itemVisualData(),
+                local.rotationItems(),
+                local.chestName(),
+                firstNonBlank(local.skinTexture(), remote.skinTexture()),
+                firstNonBlank(local.playerUuid(), remote.playerUuid()),
+                Math.max(local.updatedAtMillis(), remote.updatedAtMillis()),
+                firstNonBlank(remote.farmingCropKey(), local.farmingCropKey()),
+                Math.max(remote.farmingUpdatedAtMillis(), local.farmingUpdatedAtMillis())
         );
     }
 
@@ -614,6 +724,7 @@ public class BotBridge {
     public boolean isAdminMode()    { return adminMode; }
     public String  getServerUrl()   { return serverUrl; }
     public String  getIslandName()  { return islandName; }
+    public String  getSelectedCropKey() { return selectedCropKey; }
     public String  getLastConnectError() { return lastConnectError; }
     public String  getAdminIslandName() { return adminIslandName; }
     public long    getConfigVersion() { return configVersion; }
@@ -668,7 +779,7 @@ public class BotBridge {
     }
 
     public void tickHudRefresh() {
-        if (!isConnected() || !hudEnabled || adminMode) {
+        if (!isConnected() || adminMode || (!hudEnabled && !farmingHudEnabled)) {
             return;
         }
 
@@ -684,10 +795,17 @@ public class BotBridge {
     private void loadConfig() {
         Path path = Path.of("config", "chestbot.json");
         serverUrl  = DEFAULT_URL;
+        selectedCropKey = null;
         hudEnabled = true;
         hudX = 8;
         hudY = 8;
         hudScale = 1.0F;
+        farmingHudEnabled = true;
+        farmingHudX = 8;
+        farmingHudY = 80;
+        farmingHudScale = 1.0F;
+        chestHudPage = 0;
+        farmingHudPage = 0;
 
         if (Files.exists(path)) {
             try {
@@ -695,17 +813,38 @@ public class BotBridge {
                 if (cfg.has("server_url")) {
                     serverUrl = cfg.get("server_url").getAsString().trim();
                 }
+                if (cfg.has("farming_crop") && !cfg.get("farming_crop").isJsonNull()) {
+                    selectedCropKey = cfg.get("farming_crop").getAsString().trim();
+                }
                 if (cfg.has("hud_enabled") && !cfg.get("hud_enabled").isJsonNull()) {
                     hudEnabled = cfg.get("hud_enabled").getAsBoolean();
+                }
+                if (cfg.has("hud_farming_enabled") && !cfg.get("hud_farming_enabled").isJsonNull()) {
+                    farmingHudEnabled = cfg.get("hud_farming_enabled").getAsBoolean();
                 }
                 if (cfg.has("hud_x") && !cfg.get("hud_x").isJsonNull()) {
                     hudX = Math.max(0, cfg.get("hud_x").getAsInt());
                 }
+                if (cfg.has("hud_farming_x") && !cfg.get("hud_farming_x").isJsonNull()) {
+                    farmingHudX = Math.max(0, cfg.get("hud_farming_x").getAsInt());
+                }
                 if (cfg.has("hud_y") && !cfg.get("hud_y").isJsonNull()) {
                     hudY = Math.max(0, cfg.get("hud_y").getAsInt());
                 }
+                if (cfg.has("hud_farming_y") && !cfg.get("hud_farming_y").isJsonNull()) {
+                    farmingHudY = Math.max(0, cfg.get("hud_farming_y").getAsInt());
+                }
                 if (cfg.has("hud_scale") && !cfg.get("hud_scale").isJsonNull()) {
                     hudScale = clamp(cfg.get("hud_scale").getAsFloat(), 0.5F, 3.0F);
+                }
+                if (cfg.has("hud_farming_scale") && !cfg.get("hud_farming_scale").isJsonNull()) {
+                    farmingHudScale = clamp(cfg.get("hud_farming_scale").getAsFloat(), 0.5F, 3.0F);
+                }
+                if (cfg.has("hud_page") && !cfg.get("hud_page").isJsonNull()) {
+                    chestHudPage = Math.max(0, cfg.get("hud_page").getAsInt());
+                }
+                if (cfg.has("hud_farming_page") && !cfg.get("hud_farming_page").isJsonNull()) {
+                    farmingHudPage = Math.max(0, cfg.get("hud_farming_page").getAsInt());
                 }
             } catch (Exception e) {
                 log("config 로드 오류: " + e.getMessage());
@@ -722,10 +861,19 @@ public class BotBridge {
             Files.createDirectories(path.getParent());
             JsonObject cfg = new JsonObject();
             cfg.addProperty("server_url", serverUrl);
+            if (selectedCropKey != null && !selectedCropKey.isBlank()) {
+                cfg.addProperty("farming_crop", selectedCropKey);
+            }
             cfg.addProperty("hud_enabled", hudEnabled);
             cfg.addProperty("hud_x", hudX);
             cfg.addProperty("hud_y", hudY);
             cfg.addProperty("hud_scale", hudScale);
+            cfg.addProperty("hud_farming_enabled", farmingHudEnabled);
+            cfg.addProperty("hud_farming_x", farmingHudX);
+            cfg.addProperty("hud_farming_y", farmingHudY);
+            cfg.addProperty("hud_farming_scale", farmingHudScale);
+            cfg.addProperty("hud_page", chestHudPage);
+            cfg.addProperty("hud_farming_page", farmingHudPage);
             Files.writeString(path, new GsonBuilder().setPrettyPrinting().create().toJson(cfg));
         } catch (IOException e) {
             log("config 저장 오류: " + e.getMessage());
@@ -746,6 +894,11 @@ public class BotBridge {
             normalized = "http://" + normalized;
         }
 
+        normalized = appendDefaultPortIfMissing(normalized);
+        if (normalized == null) {
+            return null;
+        }
+
         while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1);
         }
@@ -760,6 +913,30 @@ public class BotBridge {
         return value.equalsIgnoreCase("localhost")
                 || value.matches("\\d{1,3}(\\.\\d{1,3}){3}(:\\d{1,5})?")
                 || value.matches("[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}(:\\d{1,5})?");
+    }
+
+    private static String appendDefaultPortIfMissing(String value) {
+        try {
+            URI uri = URI.create(value);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            if (scheme == null || host == null || uri.getPort() != -1) {
+                return value;
+            }
+
+            URI normalized = new URI(
+                    scheme,
+                    uri.getUserInfo(),
+                    host,
+                    DEFAULT_SERVER_PORT,
+                    uri.getPath(),
+                    uri.getQuery(),
+                    uri.getFragment()
+            );
+            return normalized.toString();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     // ── HTTP ─────────────────────────────────────────────────────
@@ -886,23 +1063,32 @@ public class BotBridge {
                     "updatedAt",
                     "createdAtMillis",
                     "timestamp");
+            String farmingCropKey = firstString(member, "farmingCropKey", "cropKey");
+            long farmingUpdatedAtMillis = firstLong(member, 0L,
+                    "farmingUpdatedAtMillis",
+                    "farmingUpdatedAt",
+                    "lastFarmingAtMillis");
 
-            if (playerName == null || playerName.isBlank() || itemName == null || itemName.isBlank()) {
+            if (playerName == null || playerName.isBlank() || ((itemName == null || itemName.isBlank()) && (farmingCropKey == null || farmingCropKey.isBlank()))) {
                 continue;
             }
 
             parsedEntries.add(new MemberHudEntry(
                     playerName,
-                    itemName,
-                    Math.max(1, itemCount),
-                    Math.max(totalKinds, 1),
-                    Math.max(totalItems, Math.max(1, itemCount)),
+                    itemName == null ? "" : itemName,
+                    Math.max(itemCount, 0),
+                    Math.max(totalKinds, 0),
+                    Math.max(totalItems, Math.max(itemCount, 0)),
                     itemVisualData,
-                    List.of(new HudRotationItem(itemName, Math.max(1, itemCount), itemVisualData)),
+                    itemName == null || itemName.isBlank()
+                            ? List.of()
+                            : List.of(new HudRotationItem(itemName, Math.max(1, itemCount), itemVisualData)),
                     chestName,
                     skinTexture,
                     playerUuid,
-                    updatedAtMillis
+                    updatedAtMillis,
+                    farmingCropKey,
+                    farmingUpdatedAtMillis
             ));
         }
 
@@ -1010,8 +1196,95 @@ public class BotBridge {
         return defaultValue;
     }
 
-    private static String normalizeHudEntryKey(String playerName) {
+    private static String normalizeHudEntryKey(String playerUuid, String playerName) {
+        String normalizedUuid = playerUuid == null ? null : playerUuid.trim().toLowerCase(Locale.ROOT);
+        if (normalizedUuid != null && !normalizedUuid.isBlank()) {
+            return normalizedUuid;
+        }
         return playerName == null ? "" : playerName.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static int nextPage(int currentPage, int totalEntries) {
+        if (totalEntries <= 1) {
+            return 0;
+        }
+        return (currentPage + 1) % totalEntries;
+    }
+
+    private static int previousPage(int currentPage, int totalEntries) {
+        if (totalEntries <= 1) {
+            return 0;
+        }
+        return (currentPage - 1 + totalEntries) % totalEntries;
+    }
+
+    public CompletableFuture<Boolean> declareFarmingCropAsync(String cropKey) {
+        return CompletableFuture.supplyAsync(() -> declareFarmingCrop(cropKey));
+    }
+
+    public boolean declareFarmingCrop(String cropKey) {
+        String normalized = cropKey == null ? null : cropKey.trim().toLowerCase(Locale.ROOT);
+        if (normalized == null || normalized.isBlank()) {
+            return false;
+        }
+
+        JsonObject body = collectCurrentPlayerProfile(null);
+        if (body == null) {
+            body = new JsonObject();
+        }
+        body.addProperty("playerName", firstNonBlank(firstString(body, "name"), "Unknown"));
+        String playerUuid = firstString(body, "uuid");
+        if (playerUuid == null || playerUuid.isBlank()) {
+            return false;
+        }
+        body.addProperty("playerUuid", playerUuid);
+        String skinTexture = firstString(body, "skinTexture");
+        if (skinTexture != null) {
+            body.addProperty("skinTexture", skinTexture);
+        }
+        body.addProperty("configVersion", configVersion);
+        body.addProperty("cropKey", normalized);
+
+        String response = postSync("/api/v1/client/events/farming/declare", body);
+        if (response == null) {
+            return false;
+        }
+
+        selectedCropKey = normalized;
+        saveConfig();
+        reloadAsync();
+        return true;
+    }
+
+    public void reportFarmingActivity(String cropKey, long activityAtMillis) {
+        String normalized = cropKey == null ? null : cropKey.trim().toLowerCase(Locale.ROOT);
+        if (normalized == null || normalized.isBlank()) {
+            return;
+        }
+        if (selectedCropKey == null || !selectedCropKey.equalsIgnoreCase(normalized)) {
+            return;
+        }
+
+        JsonObject body = collectCurrentPlayerProfile(null);
+        if (body == null) {
+            return;
+        }
+
+        String playerUuid = firstString(body, "uuid");
+        if (playerUuid == null || playerUuid.isBlank()) {
+            return;
+        }
+
+        body.addProperty("playerName", firstNonBlank(firstString(body, "name"), "Unknown"));
+        body.addProperty("playerUuid", playerUuid);
+        String skinTexture = firstString(body, "skinTexture");
+        if (skinTexture != null) {
+            body.addProperty("skinTexture", skinTexture);
+        }
+        body.addProperty("configVersion", configVersion);
+        body.addProperty("cropKey", normalized);
+        body.addProperty("activityAtMillis", activityAtMillis);
+        postJson("/api/v1/client/events/farming/activity", body);
     }
 
     private static void appendCurrentPlayerProfile(JsonObject body, String fallbackPlayerName) {
@@ -1217,6 +1490,14 @@ public class BotBridge {
         return profile.get("skinTexture").getAsString();
     }
 
+    private static String currentPlayerUuid() {
+        JsonObject profile = collectCurrentPlayerProfile(null);
+        if (profile == null || !profile.has("uuid")) {
+            return null;
+        }
+        return profile.get("uuid").getAsString();
+    }
+
     private static Long parseAmount(String amountText) {
         if (amountText == null) {
             return null;
@@ -1311,7 +1592,9 @@ public class BotBridge {
             String chestName,
             String skinTexture,
             String playerUuid,
-            long updatedAtMillis
+            long updatedAtMillis,
+            String farmingCropKey,
+            long farmingUpdatedAtMillis
     ) {
     }
 }

@@ -14,19 +14,24 @@ public class ChestBotHudEditScreen extends Screen {
     private static final float MIN_SCALE = 0.5F;
     private static final float MAX_SCALE = 3.0F;
 
-    private int hudX;
-    private int hudY;
-    private float hudScale;
+    private int chestHudX;
+    private int chestHudY;
+    private float chestHudScale;
+    private int farmingHudX;
+    private int farmingHudY;
+    private float farmingHudScale;
     private boolean firstInit = true;
     private boolean dragging;
     private boolean resizing;
     private ResizeAnchor resizeAnchor = ResizeAnchor.NONE;
     private boolean wasLeftMouseDown;
     private boolean wasEscapeDown;
+    private boolean wasTabDown;
     private int dragOffsetX;
     private int dragOffsetY;
     private double resizeFixedRight;
     private float resizeStartScale;
+    private HudTarget activeTarget = HudTarget.CHEST;
 
     public ChestBotHudEditScreen() {
         super(Text.literal("창고지기 HUD 수정"));
@@ -41,9 +46,12 @@ public class ChestBotHudEditScreen extends Screen {
 
         if (firstInit) {
             firstInit = false;
-            hudX = bridge.getHudX();
-            hudY = bridge.getHudY();
-            hudScale = bridge.getHudScale();
+            chestHudX = bridge.getHudX();
+            chestHudY = bridge.getHudY();
+            chestHudScale = bridge.getHudScale();
+            farmingHudX = bridge.getFarmingHudX();
+            farmingHudY = bridge.getFarmingHudY();
+            farmingHudScale = bridge.getFarmingHudScale();
         }
 
         clampToScreen();
@@ -61,23 +69,23 @@ public class ChestBotHudEditScreen extends Screen {
         context.fill(0, height / 2, width, height / 2 + 1, 0x33FFFFFF);
         context.fill(width / 2, 0, width / 2 + 1, height, 0x33FFFFFF);
 
-        boolean hovered = isOverHud(mouseX, mouseY);
-        ChestBotHudRenderer.HudBox hudBox = currentHudBox();
+        boolean hovered = isOverHud(mouseX, mouseY, activeTarget);
+        ChestBotHudRenderer.HudBox hudBox = currentHudBox(activeTarget);
         if (hovered || dragging) {
             int borderColor = dragging ? 0xCCA9D7D0 : 0x66A9D7D0;
-            context.fill(hudX - 2, hudY - 2, hudX + scaledWidth(hudBox) + 2, hudY + scaledHeight(hudBox) + 2, borderColor);
+            context.fill(currentX(activeTarget) - 2, currentY(activeTarget) - 2, currentX(activeTarget) + scaledWidth(hudBox) + 2, currentY(activeTarget) + scaledHeight(hudBox) + 2, borderColor);
         }
 
-        ChestBotHudRenderer.renderPreview(context, hudX, hudY, hudScale);
+        ChestBotHudRenderer.renderAllPreviews(context);
 
         drawResizeHandle(context, leftResizeHandleLeft(), resizeHandleTop(), resizing && resizeAnchor == ResizeAnchor.BOTTOM_LEFT);
         drawResizeHandle(context, rightResizeHandleLeft(), resizeHandleTop(), resizing && resizeAnchor == ResizeAnchor.BOTTOM_RIGHT);
 
         context.drawText(textRenderer,
-                Text.literal(String.format("X: %d  Y: %d  Scale: %.2f", hudX, hudY, hudScale)),
+                Text.literal(String.format("대상: %s | X: %d  Y: %d  Scale: %.2f", activeTarget.label, currentX(activeTarget), currentY(activeTarget), currentScale(activeTarget))),
                 4, 4, 0xFFAAAAAA, false);
 
-        Text hint = Text.literal("드래그 이동 | 아래 양쪽 모서리로 크기 조절 | ESC 종료");
+        Text hint = Text.literal("클릭으로 대상 선택 | 드래그 이동 | 아래 양쪽 모서리 크기 조절 | TAB 전환 | ESC 종료");
         int hintWidth = textRenderer.getWidth(hint);
         context.fill(0, height - 24, width, height, 0xAA000000);
         context.drawText(textRenderer, hint, (width - hintWidth) / 2, height - 16, 0xFFE0D4F0, true);
@@ -93,6 +101,7 @@ public class ChestBotHudEditScreen extends Screen {
         long windowHandle = client.getWindow().getHandle();
         boolean leftMouseDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
         boolean escapeDown = GLFW.glfwGetKey(windowHandle, GLFW.GLFW_KEY_ESCAPE) == GLFW.GLFW_PRESS;
+        boolean tabDown = GLFW.glfwGetKey(windowHandle, GLFW.GLFW_KEY_TAB) == GLFW.GLFW_PRESS;
 
         if (escapeDown && !wasEscapeDown) {
             close();
@@ -100,44 +109,57 @@ public class ChestBotHudEditScreen extends Screen {
             return;
         }
 
+        if (tabDown && !wasTabDown) {
+            activeTarget = activeTarget == HudTarget.CHEST ? HudTarget.FARMING : HudTarget.CHEST;
+        }
+
         if (leftMouseDown && !wasLeftMouseDown) {
             if (isOverLeftResizeHandle(mouseX, mouseY)) {
                 resizing = true;
                 resizeAnchor = ResizeAnchor.BOTTOM_LEFT;
                 dragging = false;
-                resizeFixedRight = hudX + scaledWidth(currentHudBox());
-                resizeStartScale = hudScale;
+                resizeFixedRight = currentX(activeTarget) + scaledWidth(currentHudBox(activeTarget));
+                resizeStartScale = currentScale(activeTarget);
             } else if (isOverRightResizeHandle(mouseX, mouseY)) {
                 resizing = true;
                 resizeAnchor = ResizeAnchor.BOTTOM_RIGHT;
                 dragging = false;
-                resizeFixedRight = hudX + scaledWidth(currentHudBox());
-                resizeStartScale = hudScale;
-            } else if (isOverHud(mouseX, mouseY)) {
+                resizeFixedRight = currentX(activeTarget) + scaledWidth(currentHudBox(activeTarget));
+                resizeStartScale = currentScale(activeTarget);
+            } else if (isOverHud(mouseX, mouseY, HudTarget.CHEST)) {
+                activeTarget = HudTarget.CHEST;
                 dragging = true;
                 resizing = false;
                 resizeAnchor = ResizeAnchor.NONE;
-                dragOffsetX = mouseX - hudX;
-                dragOffsetY = mouseY - hudY;
+                dragOffsetX = mouseX - currentX(activeTarget);
+                dragOffsetY = mouseY - currentY(activeTarget);
+            } else if (isOverHud(mouseX, mouseY, HudTarget.FARMING)) {
+                activeTarget = HudTarget.FARMING;
+                dragging = true;
+                resizing = false;
+                resizeAnchor = ResizeAnchor.NONE;
+                dragOffsetX = mouseX - currentX(activeTarget);
+                dragOffsetY = mouseY - currentY(activeTarget);
             } else {
                 dragging = false;
                 resizing = false;
                 resizeAnchor = ResizeAnchor.NONE;
             }
         } else if (leftMouseDown && dragging) {
-            ChestBotHudRenderer.HudBox hudBox = currentHudBox();
+            ChestBotHudRenderer.HudBox hudBox = currentHudBox(activeTarget);
             int rawX = mouseX - dragOffsetX;
             int rawY = mouseY - dragOffsetY;
-            hudX = snapX(clamp(rawX, 0, Math.max(0, width - scaledWidth(hudBox))), hudBox);
-            hudY = snapY(clamp(rawY, 0, Math.max(0, height - scaledHeight(hudBox))), hudBox);
+            int nextX = snapX(clamp(rawX, 0, Math.max(0, width - scaledWidth(hudBox))), hudBox);
+            int nextY = snapY(clamp(rawY, 0, Math.max(0, height - scaledHeight(hudBox))), hudBox);
+            setCurrentLayout(activeTarget, nextX, nextY, currentScale(activeTarget));
             applyLiveLayout();
         } else if (leftMouseDown && resizing) {
             float newScale = computeResizedScale(mouseX, mouseY);
-            if (newScale != hudScale) {
-                hudScale = newScale;
+            if (newScale != currentScale(activeTarget)) {
+                setCurrentLayout(activeTarget, currentX(activeTarget), currentY(activeTarget), newScale);
                 if (resizeAnchor == ResizeAnchor.BOTTOM_LEFT) {
-                    ChestBotHudRenderer.HudBox resizedBox = currentHudBox();
-                    hudX = (int) Math.round(resizeFixedRight - scaledWidth(resizedBox));
+                    ChestBotHudRenderer.HudBox resizedBox = currentHudBox(activeTarget);
+                    setCurrentLayout(activeTarget, (int) Math.round(resizeFixedRight - scaledWidth(resizedBox)), currentY(activeTarget), currentScale(activeTarget));
                 }
                 clampToScreen();
                 applyLiveLayout();
@@ -150,14 +172,15 @@ public class ChestBotHudEditScreen extends Screen {
 
         wasLeftMouseDown = leftMouseDown;
         wasEscapeDown = escapeDown;
+        wasTabDown = tabDown;
     }
 
     @Override
     public void close() {
         BotBridge bridge = ChestBotMod.getBridge();
         if (bridge != null) {
-            bridge.setHudEnabled(true);
-            bridge.applyHudLayout(hudX, hudY, hudScale);
+            bridge.applyHudLayout(chestHudX, chestHudY, chestHudScale);
+            bridge.applyFarmingHudLayout(farmingHudX, farmingHudY, farmingHudScale);
             bridge.persistHudLayout();
             bridge.setHudEditMode(false);
         }
@@ -169,8 +192,8 @@ public class ChestBotHudEditScreen extends Screen {
         return false;
     }
 
-    private boolean isOverHud(int mouseX, int mouseY) {
-        return currentHudBox().contains(mouseX, mouseY);
+    private boolean isOverHud(int mouseX, int mouseY, HudTarget target) {
+        return currentHudBox(target).contains(mouseX, mouseY);
     }
 
     private boolean isOverLeftResizeHandle(int mouseX, int mouseY) {
@@ -206,22 +229,24 @@ public class ChestBotHudEditScreen extends Screen {
     }
 
     private int leftResizeHandleLeft() {
-        return hudX;
+        return currentX(activeTarget);
     }
 
     private int rightResizeHandleLeft() {
-        return hudX + scaledWidth(currentHudBox()) - RESIZE_HANDLE_SIZE;
+        return currentX(activeTarget) + scaledWidth(currentHudBox(activeTarget)) - RESIZE_HANDLE_SIZE;
     }
 
     private int resizeHandleTop() {
-        return hudY + scaledHeight(currentHudBox()) - RESIZE_HANDLE_SIZE;
+        return currentY(activeTarget) + scaledHeight(currentHudBox(activeTarget)) - RESIZE_HANDLE_SIZE;
     }
 
-    private ChestBotHudRenderer.HudBox currentHudBox() {
+    private ChestBotHudRenderer.HudBox currentHudBox(HudTarget target) {
         if (client == null) {
-            return new ChestBotHudRenderer.HudBox(hudX, hudY, 0, 0, hudScale);
+            return new ChestBotHudRenderer.HudBox(currentX(target), currentY(target), 0, 0, currentScale(target));
         }
-        return ChestBotHudRenderer.getHudBox(ChestBotMod.getBridge(), true, client, hudX, hudY, hudScale);
+        return target == HudTarget.CHEST
+                ? ChestBotHudRenderer.getHudBox(ChestBotMod.getBridge(), true, client, currentX(target), currentY(target), currentScale(target))
+                : FarmingHudRenderer.getHudBox(ChestBotMod.getBridge(), true, client, currentX(target), currentY(target), currentScale(target));
     }
 
     private int scaledWidth(ChestBotHudRenderer.HudBox hudBox) {
@@ -233,20 +258,25 @@ public class ChestBotHudEditScreen extends Screen {
     }
 
     private void clampToScreen() {
-        ChestBotHudRenderer.HudBox hudBox = currentHudBox();
-        hudX = clamp(hudX, 0, Math.max(0, width - scaledWidth(hudBox)));
-        hudY = clamp(hudY, 0, Math.max(0, height - scaledHeight(hudBox)));
+        for (HudTarget target : HudTarget.values()) {
+            ChestBotHudRenderer.HudBox hudBox = currentHudBox(target);
+            setCurrentLayout(target,
+                    clamp(currentX(target), 0, Math.max(0, width - scaledWidth(hudBox))),
+                    clamp(currentY(target), 0, Math.max(0, height - scaledHeight(hudBox))),
+                    currentScale(target));
+        }
     }
 
     private void applyLiveLayout() {
         BotBridge bridge = ChestBotMod.getBridge();
         if (bridge != null) {
-            bridge.applyHudLayout(hudX, hudY, hudScale);
+            bridge.applyHudLayout(chestHudX, chestHudY, chestHudScale);
+            bridge.applyFarmingHudLayout(farmingHudX, farmingHudY, farmingHudScale);
         }
     }
 
     private float computeResizedScale(int mouseX, int mouseY) {
-        ChestBotHudRenderer.HudBox hudBox = currentHudBox();
+        ChestBotHudRenderer.HudBox hudBox = currentHudBox(activeTarget);
         float baseWidth = Math.max(hudBox.width(), 1);
         float baseHeight = Math.max(hudBox.height(), 1);
         float widthScale;
@@ -254,11 +284,46 @@ public class ChestBotHudEditScreen extends Screen {
         if (resizeAnchor == ResizeAnchor.BOTTOM_LEFT) {
             widthScale = (float) ((resizeFixedRight - mouseX) / baseWidth);
         } else {
-            widthScale = (float) ((mouseX - hudX) / baseWidth);
+            widthScale = (float) ((mouseX - currentX(activeTarget)) / baseWidth);
         }
 
-        float heightScale = (float) ((mouseY - hudY) / baseHeight);
+        float heightScale = (float) ((mouseY - currentY(activeTarget)) / baseHeight);
         return clampScale(Math.max(widthScale, heightScale));
+    }
+
+    private int currentX(HudTarget target) {
+        return target == HudTarget.CHEST ? chestHudX : farmingHudX;
+    }
+
+    private int currentY(HudTarget target) {
+        return target == HudTarget.CHEST ? chestHudY : farmingHudY;
+    }
+
+    private float currentScale(HudTarget target) {
+        return target == HudTarget.CHEST ? chestHudScale : farmingHudScale;
+    }
+
+    private void setCurrentLayout(HudTarget target, int x, int y, float scale) {
+        if (target == HudTarget.CHEST) {
+            chestHudX = x;
+            chestHudY = y;
+            chestHudScale = scale;
+        } else {
+            farmingHudX = x;
+            farmingHudY = y;
+            farmingHudScale = scale;
+        }
+    }
+
+    private enum HudTarget {
+        CHEST("창고 HUD"),
+        FARMING("농작물 HUD");
+
+        private final String label;
+
+        HudTarget(String label) {
+            this.label = label;
+        }
     }
 
     private void drawResizeHandle(DrawContext context, int left, int top, boolean active) {

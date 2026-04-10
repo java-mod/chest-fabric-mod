@@ -29,6 +29,7 @@ public final class ChestBotHudRenderer {
     private static final int PADDING = 6;
     private static final int ROW_HEIGHT = 24;
     private static final int TITLE_HEIGHT = 12;
+    private static final long FARMING_ACTIVE_WINDOW_MILLIS = 5 * 60 * 1000L;
 
     private ChestBotHudRenderer() {
     }
@@ -47,15 +48,16 @@ public final class ChestBotHudRenderer {
         }
 
         List<BotBridge.MemberHudEntry> entries = getRenderableEntries(bridge, preview);
-        String title = preview ? "[창고지기] HUD 수정 모드" : buildHudTitle(bridge);
+        int totalEntries = getRenderableEntryCount(bridge, preview);
+        String title = preview ? pageTitle("[창고지기] HUD 수정 모드", bridge.getChestHudPage(), totalEntries) : buildHudTitle(bridge, totalEntries);
         int textWidth = textRenderer.getWidth(title);
         for (BotBridge.MemberHudEntry entry : entries) {
             BotBridge.HudRotationItem displayItem = currentRotationItem(entry);
             String playerLine = playerLine(entry);
-            String detailLine = detailLine(displayItem);
+            String detailLine = detailLine(entry, displayItem);
             textWidth = Math.max(textWidth, Math.max(textRenderer.getWidth(playerLine), textRenderer.getWidth(detailLine)));
             for (BotBridge.HudRotationItem item : rotationItems(entry)) {
-                textWidth = Math.max(textWidth, textRenderer.getWidth(detailLine(item)));
+                textWidth = Math.max(textWidth, textRenderer.getWidth(detailLine(entry, item)));
             }
         }
 
@@ -67,7 +69,7 @@ public final class ChestBotHudRenderer {
     public static void render(DrawContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         BotBridge bridge = ChestBotMod.getBridge();
-        if (client == null || client.player == null || bridge == null || !bridge.isHudEnabled()) {
+        if (client == null || client.player == null || bridge == null || (!bridge.isHudEnabled() && !bridge.isFarmingHudEnabled())) {
             return;
         }
 
@@ -76,22 +78,15 @@ public final class ChestBotHudRenderer {
             return;
         }
 
-        boolean preview = bridge.isHudEditMode();
-        List<BotBridge.MemberHudEntry> entries = getRenderableEntries(bridge, preview);
-        if (entries.isEmpty()) {
-            return;
+        if (bridge.isHudEnabled()) {
+            List<BotBridge.MemberHudEntry> entries = getRenderableEntries(bridge, false);
+            if (!entries.isEmpty()) {
+                renderEntries(context, client, entries, false, bridge.getHudX(), bridge.getHudY(), bridge.getHudScale());
+            }
         }
-
-        TextRenderer textRenderer = client.textRenderer;
-        if (textRenderer == null) {
-            return;
+        if (bridge.isFarmingHudEnabled()) {
+            FarmingHudRenderer.render(context);
         }
-
-        int x = bridge.getHudX();
-        int y = bridge.getHudY();
-        float scale = bridge.getHudScale();
-
-        renderEntries(context, client, entries, preview, x, y, scale);
     }
 
     public static void renderPreview(DrawContext context, int x, int y, float scale) {
@@ -103,8 +98,35 @@ public final class ChestBotHudRenderer {
         renderEntries(context, client, getRenderableEntries(bridge, true), true, x, y, scale);
     }
 
+    public static int getRenderableEntryCount(BotBridge bridge, boolean preview) {
+        return fullRenderableEntries(bridge, preview).size();
+    }
+
+    public static void renderAllPreviews(DrawContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        BotBridge bridge = ChestBotMod.getBridge();
+        if (client == null || bridge == null) {
+            return;
+        }
+        renderPreview(context, bridge.getHudX(), bridge.getHudY(), bridge.getHudScale());
+        FarmingHudRenderer.renderPreview(context, bridge.getFarmingHudX(), bridge.getFarmingHudY(), bridge.getFarmingHudScale());
+    }
+
     private static List<BotBridge.MemberHudEntry> getRenderableEntries(BotBridge bridge, boolean preview) {
-        List<BotBridge.MemberHudEntry> entries = bridge.getHudEntries();
+        List<BotBridge.MemberHudEntry> entries = fullRenderableEntries(bridge, preview);
+        if (entries.isEmpty()) {
+            return entries;
+        }
+        return paginate(entries, bridge.getChestHudPage());
+    }
+
+    private static List<BotBridge.MemberHudEntry> fullRenderableEntries(BotBridge bridge, boolean preview) {
+        List<BotBridge.MemberHudEntry> entries = bridge.getHudEntries().stream()
+                .filter(entry -> {
+                    BotBridge.HudRotationItem item = currentRotationItem(entry);
+                    return item != null && item.itemName() != null && !item.itemName().isBlank() && item.itemCount() > 0;
+                })
+                .toList();
         if (!entries.isEmpty()) {
             return entries;
         }
@@ -122,46 +144,13 @@ public final class ChestBotHudRenderer {
                             "섬원 기록을 기다리는 중",
                             null,
                             null,
-                            System.currentTimeMillis())
+                            System.currentTimeMillis(),
+                            null,
+                            0L)
             );
         }
 
-        if (!preview) {
-            return List.of();
-        }
-
-        return List.of(
-                new BotBridge.MemberHudEntry(
-                        "Steve",
-                        "diamond",
-                        3,
-                        2,
-                        7,
-                        null,
-                        List.of(
-                                new BotBridge.HudRotationItem("diamond", 3, null),
-                                new BotBridge.HudRotationItem("gold_ingot", 4, null)
-                        ),
-                        "광물 창고",
-                        null,
-                        null,
-                        System.currentTimeMillis()),
-                new BotBridge.MemberHudEntry(
-                        "Alex",
-                        "iron_ingot",
-                        16,
-                        2,
-                        24,
-                        null,
-                        List.of(
-                                new BotBridge.HudRotationItem("iron_ingot", 16, null),
-                                new BotBridge.HudRotationItem("coal", 8, null)
-                        ),
-                        "재료 창고",
-                        null,
-                        null,
-                        System.currentTimeMillis())
-        );
+        return List.of();
     }
 
     private static void renderEntries(DrawContext context,
@@ -176,7 +165,8 @@ public final class ChestBotHudRenderer {
             return;
         }
 
-        String title = preview ? "[창고지기] HUD 수정 모드" : buildHudTitle(ChestBotMod.getBridge());
+        int totalEntries = getRenderableEntryCount(ChestBotMod.getBridge(), preview);
+        String title = preview ? pageTitle("[창고지기] HUD 수정 모드", ChestBotMod.getBridge().getChestHudPage(), totalEntries) : buildHudTitle(ChestBotMod.getBridge(), totalEntries);
         HudBox hudBox = getHudBox(ChestBotMod.getBridge(), preview, client, x, y, scale);
         int width = hudBox.width();
         int height = hudBox.height();
@@ -205,7 +195,7 @@ public final class ChestBotHudRenderer {
             if (!PlayerSkinRenderCompat.drawPlayerHead(context, client, entry.playerUuid(), entry.playerName(), headX, headY, ROW_HEAD_SIZE)) {
                 context.drawItem(createPlayerHead(entry), headX, headY);
             }
-            context.drawItem(resolveVisualStack(client, displayItem), itemX, itemY);
+            context.drawItem(resolveVisualStack(client, entry, displayItem), itemX, itemY);
             context.drawText(textRenderer,
                     Text.literal(playerLine(entry)),
                     textX,
@@ -213,7 +203,7 @@ public final class ChestBotHudRenderer {
                     TEXT_COLOR,
                     false);
             context.drawText(textRenderer,
-                    Text.literal(detailLine(displayItem)),
+                    Text.literal(detailLine(entry, displayItem)),
                     textX,
                     rowY + 11,
                     SUBTEXT_COLOR,
@@ -233,30 +223,53 @@ public final class ChestBotHudRenderer {
         HudMatricesCompat.pop(context);
     }
 
-    private static String detailLine(BotBridge.HudRotationItem item) {
+    private static String detailLine(BotBridge.MemberHudEntry entry, BotBridge.HudRotationItem item) {
+        if (item == null || item.itemName() == null || item.itemName().isBlank() || item.itemCount() <= 0) {
+            return "최근 가져감 없음";
+        }
         return ChestHudItemVisuals.stripActionPrefix(item.itemName()) + " x" + item.itemCount();
     }
 
-    private static String buildHudTitle(BotBridge bridge) {
+    private static String buildHudTitle(BotBridge bridge, int totalEntries) {
         if (bridge == null || bridge.getIslandName() == null || bridge.getIslandName().isBlank()) {
-            return "[창고지기] 섬원 가져감";
+            return pageTitle("[창고지기] 섬원 가져감", bridge == null ? 0 : bridge.getChestHudPage(), totalEntries);
         }
-        return "[창고지기] " + bridge.getIslandName();
+        return pageTitle("[창고지기] " + bridge.getIslandName(), bridge.getChestHudPage(), totalEntries);
+    }
+
+    private static String pageTitle(String base, int page, int total) {
+        return total <= 1 ? base : base + " §7(" + (page + 1) + "/" + total + ")";
+    }
+
+    private static List<BotBridge.MemberHudEntry> paginate(List<BotBridge.MemberHudEntry> entries, int page) {
+        if (entries.isEmpty()) {
+            return entries;
+        }
+        int index = Math.max(0, Math.min(page, entries.size() - 1));
+        return List.of(entries.get(index));
     }
 
     private static ItemStack createPlayerHead(BotBridge.MemberHudEntry entry) {
         return new ItemStack(Items.PLAYER_HEAD);
     }
 
-    private static ItemStack resolveVisualStack(MinecraftClient client, BotBridge.HudRotationItem item) {
-        ItemStack stack = ItemStackVisualCompat.deserialize(client, item.itemVisualData());
-        return stack.isEmpty() ? new ItemStack(Items.CHEST) : stack;
+    private static ItemStack resolveVisualStack(MinecraftClient client, BotBridge.MemberHudEntry entry, BotBridge.HudRotationItem item) {
+        if (item != null) {
+            ItemStack stack = ItemStackVisualCompat.deserialize(client, item.itemVisualData());
+            if (!stack.isEmpty()) {
+                return stack;
+            }
+        }
+        return new ItemStack(Items.CHEST);
     }
 
     private static List<BotBridge.HudRotationItem> rotationItems(BotBridge.MemberHudEntry entry) {
         List<BotBridge.HudRotationItem> items = entry.rotationItems();
         if (items != null && !items.isEmpty()) {
             return items;
+        }
+        if (entry.itemName() == null || entry.itemName().isBlank() || entry.itemCount() <= 0) {
+            return List.of();
         }
         return List.of(new BotBridge.HudRotationItem(entry.itemName(), entry.itemCount(), entry.itemVisualData()));
     }
@@ -268,7 +281,7 @@ public final class ChestBotHudRenderer {
             long elapsed = Math.max(0L, System.currentTimeMillis() - entry.updatedAtMillis());
             index = (int) ((elapsed / ITEM_ROTATION_INTERVAL_MILLIS) % items.size());
         }
-        return items.get(index);
+        return items.isEmpty() ? null : items.get(index);
     }
 
     private static String playerLine(BotBridge.MemberHudEntry entry) {

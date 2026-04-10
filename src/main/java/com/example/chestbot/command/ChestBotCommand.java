@@ -2,6 +2,7 @@ package com.example.chestbot.command;
 
 import com.example.chestbot.BotBridge;
 import com.example.chestbot.ChestBotMod;
+import com.example.chestbot.FarmingActivityWatcher;
 import com.example.chestbot.hud.ChestBotHudEditScreen;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
@@ -44,6 +45,13 @@ public class ChestBotCommand {
         return builder.buildFuture();
     };
 
+    private static final SuggestionProvider<FabricClientCommandSource> CROP_SUGGESTIONS = (ctx, builder) -> {
+        FarmingActivityWatcher.suggestionLabels().stream()
+                .filter(name -> name.toLowerCase().startsWith(builder.getRemainingLowerCase()))
+                .forEach(builder::suggest);
+        return builder.buildFuture();
+    };
+
     public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher) {
         dispatcher.register(buildRoot("chestbot", false));
         dispatcher.register(buildRoot("창고봇", true));
@@ -58,7 +66,10 @@ public class ChestBotCommand {
         String add = korean ? "추가" : "add";
         String remove = korean ? "제거" : "remove";
         String depositReason = korean ? "입금사유" : "depositreason";
+        String crop = korean ? "농작물" : "crop";
         String hud = korean ? "허드" : "hud";
+        String farmingHud = korean ? "농사허드" : "farminghud";
+        String chestHud = korean ? "창고허드" : "chesthud";
         String toggle = korean ? "토글" : "toggle";
         String position = korean ? "위치" : "position";
         String scale = korean ? "크기" : "scale";
@@ -263,30 +274,59 @@ public class ChestBotCommand {
                                      return 0;
                                  })))
 
-                .then(ClientCommandManager.literal(hud)
+                .then(ClientCommandManager.literal(crop)
                         .executes(ctx -> {
                             BotBridge bridge = ChestBotMod.getBridge();
-                            ctx.getSource().sendFeedback(text("§6[창고지기 HUD] "
-                                    + (bridge.isHudEnabled() ? "활성화" : "비활성화")
-                                    + " §7| 위치: §f" + bridge.getHudX() + ", " + bridge.getHudY()
-                                    + " §7| 크기: §f" + String.format(java.util.Locale.ROOT, "%.2f", bridge.getHudScale())));
-                            if (korean) {
-                                ctx.getSource().sendFeedback(text("§7사용 예시: /창고봇 허드 수정모드, /창고봇 허드 크기 1.2, /창고봇 허드 토글"));
+                            String selected = bridge.getSelectedCropKey();
+                            if (selected == null || selected.isBlank()) {
+                                ctx.getSource().sendFeedback(text("§7[창고지기] 현재 설정된 농작물이 없습니다."));
+                            } else {
+                                ctx.getSource().sendFeedback(text("§a[창고지기] 현재 농작물: §f" + FarmingActivityWatcher.displayName(selected)));
                             }
                             return 1;
                         })
-                        .then(ClientCommandManager.literal(toggle)
+                        .then(ClientCommandManager.argument("cropName", StringArgumentType.greedyString())
+                                .suggests(CROP_SUGGESTIONS)
                                 .executes(ctx -> {
+                                    String cropName = StringArgumentType.getString(ctx, "cropName");
+                                    String cropKey = FarmingActivityWatcher.normalizeCropKey(cropName);
+                                    if (cropKey == null) {
+                                        ctx.getSource().sendFeedback(text("§c[창고지기] 지원하지 않는 농작물입니다."));
+                                        return 0;
+                                    }
+
                                     BotBridge bridge = ChestBotMod.getBridge();
-                                    boolean next = !bridge.isHudEnabled();
-                                    bridge.setHudEnabled(next);
-                                    ctx.getSource().sendFeedback(text("§e[창고지기 HUD] " + (next ? "표시 켜짐" : "표시 꺼짐")));
+                                    ctx.getSource().sendFeedback(text("§7[창고지기] 농작물 상태를 서버에 등록하는 중..."));
+                                    runAsync(ctx.getSource(), bridge.declareFarmingCropAsync(cropKey), ok -> {
+                                        if (ok) {
+                                            ctx.getSource().sendFeedback(text("§a[창고지기] ✅ 현재 캐는 작물: §f" + FarmingActivityWatcher.displayName(cropKey)));
+                                        } else {
+                                            ctx.getSource().sendFeedback(text("§c[창고지기] ❌ 농작물 상태 등록 실패. 서버 연결 상태를 확인하세요."));
+                                        }
+                                    });
                                     return 1;
-                                }))
+                                })))
+
+                .then(ClientCommandManager.literal(hud)
+                        .executes(ctx -> {
+                            BotBridge bridge = ChestBotMod.getBridge();
+                            ctx.getSource().sendFeedback(text("§6[창고지기 HUD] 창고: "
+                                    + (bridge.isHudEnabled() ? "활성화" : "비활성화")
+                                    + " §7| 위치: §f" + bridge.getHudX() + ", " + bridge.getHudY()
+                                    + " §7| 크기: §f" + String.format(java.util.Locale.ROOT, "%.2f", bridge.getHudScale())));
+                            ctx.getSource().sendFeedback(text("§2[농작물 HUD] "
+                                    + (bridge.isFarmingHudEnabled() ? "활성화" : "비활성화")
+                                    + " §7| 위치: §f" + bridge.getFarmingHudX() + ", " + bridge.getFarmingHudY()
+                                    + " §7| 크기: §f" + String.format(java.util.Locale.ROOT, "%.2f", bridge.getFarmingHudScale())));
+                            if (korean) {
+                                ctx.getSource().sendFeedback(text("§7사용 예시: /창고봇 허드 수정모드, /창고봇 허드 크기 1.2, /창고봇 창고허드 토글, /창고봇 농사허드 토글"));
+                                ctx.getSource().sendFeedback(text("§7토글 전용: /창고봇 창고허드 토글, /창고봇 농사허드 토글"));
+                            }
+                            return 1;
+                        })
                         .then(ClientCommandManager.literal(edit)
                                 .executes(ctx -> {
                                     BotBridge bridge = ChestBotMod.getBridge();
-                                    bridge.setHudEnabled(true);
                                     bridge.setHudEditMode(true);
                                     MinecraftClient client = MinecraftClient.getInstance();
                                     client.send(() -> {
@@ -325,10 +365,73 @@ public class ChestBotCommand {
                         .then(ClientCommandManager.literal(reset)
                                 .executes(ctx -> {
                                     BotBridge bridge = ChestBotMod.getBridge();
-                                    bridge.setHudEnabled(true);
                                     bridge.setHudPosition(8, 8);
                                     bridge.setHudScale(1.0F);
+                                    bridge.resetChestHudPage();
                                     ctx.getSource().sendFeedback(text("§e[창고지기 HUD] 위치/크기가 기본값으로 초기화되었습니다."));
+                                    return 1;
+                                })))
+
+                .then(ClientCommandManager.literal(chestHud)
+                        .executes(ctx -> {
+                            BotBridge bridge = ChestBotMod.getBridge();
+                            ctx.getSource().sendFeedback(text("§6[창고 HUD] " + (bridge.isHudEnabled() ? "활성화" : "비활성화")));
+                            return 1;
+                        })
+                        .then(ClientCommandManager.literal(toggle)
+                                .executes(ctx -> {
+                                    BotBridge bridge = ChestBotMod.getBridge();
+                                    boolean next = !bridge.isHudEnabled();
+                                    bridge.setHudEnabled(next);
+                                    ctx.getSource().sendFeedback(text("§6[창고 HUD] " + (next ? "표시 켜짐" : "표시 꺼짐")));
+                                    return 1;
+                                })))
+
+                .then(ClientCommandManager.literal(farmingHud)
+                        .executes(ctx -> {
+                            BotBridge bridge = ChestBotMod.getBridge();
+                            ctx.getSource().sendFeedback(text("§2[농작물 HUD] "
+                                    + (bridge.isFarmingHudEnabled() ? "활성화" : "비활성화")
+                                    + " §7| 위치: §f" + bridge.getFarmingHudX() + ", " + bridge.getFarmingHudY()
+                                    + " §7| 크기: §f" + String.format(java.util.Locale.ROOT, "%.2f", bridge.getFarmingHudScale())));
+                            return 1;
+                        })
+                        .then(ClientCommandManager.literal(toggle)
+                                .executes(ctx -> {
+                                    BotBridge bridge = ChestBotMod.getBridge();
+                                    boolean next = !bridge.isFarmingHudEnabled();
+                                    bridge.setFarmingHudEnabled(next);
+                                    ctx.getSource().sendFeedback(text("§2[농작물 HUD] " + (next ? "표시 켜짐" : "표시 꺼짐")));
+                                    return 1;
+                                }))
+                        .then(ClientCommandManager.literal(position)
+                                .then(ClientCommandManager.argument("x", IntegerArgumentType.integer(0))
+                                        .then(ClientCommandManager.argument("y", IntegerArgumentType.integer(0))
+                                                .executes(ctx -> {
+                                                    int x = IntegerArgumentType.getInteger(ctx, "x");
+                                                    int y = IntegerArgumentType.getInteger(ctx, "y");
+                                                    BotBridge bridge = ChestBotMod.getBridge();
+                                                    bridge.setFarmingHudPosition(x, y);
+                                                    ctx.getSource().sendFeedback(text("§2[농작물 HUD] 위치 변경: §f" + x + ", " + y));
+                                                    return 1;
+                                                }))))
+                        .then(ClientCommandManager.literal(scale)
+                                .then(ClientCommandManager.argument("value", DoubleArgumentType.doubleArg(0.5D, 3.0D))
+                                        .executes(ctx -> {
+                                            float value = (float) DoubleArgumentType.getDouble(ctx, "value");
+                                            BotBridge bridge = ChestBotMod.getBridge();
+                                            bridge.setFarmingHudScale(value);
+                                            ctx.getSource().sendFeedback(text("§2[농작물 HUD] 크기 변경: §f"
+                                                    + String.format(java.util.Locale.ROOT, "%.2f", bridge.getFarmingHudScale())));
+                                            return 1;
+                                        })))
+                        .then(ClientCommandManager.literal(reset)
+                                .executes(ctx -> {
+                                    BotBridge bridge = ChestBotMod.getBridge();
+                                    bridge.setFarmingHudPosition(8, 80);
+                                    bridge.setFarmingHudScale(1.0F);
+                                    bridge.resetFarmingHudPage();
+                                    ctx.getSource().sendFeedback(text("§2[농작물 HUD] 위치/크기가 기본값으로 초기화되었습니다."));
                                     return 1;
                                 })))
 
