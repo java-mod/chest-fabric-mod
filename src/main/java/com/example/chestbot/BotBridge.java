@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class BotBridge {
 
-    private static final String DEFAULT_URL = "https://chestbot.kro.kr";
+    private static final String DEFAULT_URL = "lochalhost";
     private static final int DEFAULT_SERVER_PORT = 5000;
     private static final long HUD_REFRESH_INTERVAL_MILLIS = 10_000L;
 
